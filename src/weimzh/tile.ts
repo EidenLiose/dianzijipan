@@ -226,4 +226,14 @@ export class CTile {
       RemainTiles[i1][i2] += 1
     }
   }
+
+  static TotalRemainingTiles(): number {
+    let sum = 0
+    for (let i = 0; i < 5; i++) {
+      for (let j = 0; j < 9; j++) {
+        sum += RemainTiles[i][j]
+      }
+    }
+    return sum
+  }
 }

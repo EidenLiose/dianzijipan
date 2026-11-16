@@ -3,7 +3,7 @@ import { CTile, TileSuit } from './tile'
 import { CHand, handtile_flags, chow_location, MAX_HANDTILE } from './hand'
 import { CGeneral, TileDir, SoundId, TILE_WIDTH, TILE_HEIGHT_CONCEALED, TILE_HEIGHT_SHOWN, TILE_HEIGHT_WALL } from './general'
 import { msg, RandomLong, setGameSeed } from './titles'
-import { PvpManager } from './pvpManager'
+import { PvpManager, type SeatPlayerInfo, type StartMatchPayload } from './pvpManager'
 
 export enum discarded_flags {
   DT_NULL = 0,
@@ -1418,7 +1418,10 @@ export class CPlayer extends CBasePlayer {
       switch (key) {
         case 'y':
         case 'Y':
-          if ((this.m_iState & (playerstate_flags.PS_ASKED | playerstate_flags.PS_KONGED)) === 0) {
+          if (
+            (!this.gpGame.isPvpMode || (this.gpGame.allowDonden && this.gpGame.pvpGameMode === '2P')) &&
+            (this.m_iState & (playerstate_flags.PS_ASKED | playerstate_flags.PS_KONGED)) === 0
+          ) {
             if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
               this.gpGame.pvpManager.sendPvpMove({ phase: 'DONDEN', act: 0 })
             }
@@ -1561,7 +1564,11 @@ export class CPlayer extends CBasePlayer {
       switch (key) {
         case 'y':
         case 'Y':
-          if (!reach && (this.m_iState & (playerstate_flags.PS_ASKED | playerstate_flags.PS_KONGED)) === 0) {
+          if (
+            !reach &&
+            (!this.gpGame.isPvpMode || (this.gpGame.allowDonden && this.gpGame.pvpGameMode === '2P')) &&
+            (this.m_iState & (playerstate_flags.PS_ASKED | playerstate_flags.PS_KONGED)) === 0
+          ) {
             if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
               this.gpGame.pvpManager.sendPvpMove({ phase: 'DONDEN', act: 0 })
             }
@@ -2005,6 +2012,16 @@ export class CBot extends CBasePlayer {
     }
     return bestIdx
   }
+
+  public pickBestDiscardIndexPublic(): number {
+    return this.pickBestDiscardIndex()
+  }
+}
+
+export interface FourPlayerSeatState extends SeatPlayerInfo {
+  score: number
+  chips: number
+  playerObj: CBasePlayer
 }
 
 export class CGame {
@@ -2038,15 +2055,20 @@ export class CGame {
   public forceNextFirstChance: boolean = false
   public forceNextReachBonus: boolean = false
 
-  // PVP 1v1 Multiplayer State (PRD 4.4)
+  // PVP 1v1 & 4P Multiplayer State (PRD 4.4)
   public pvpManager: PvpManager | null = null
   public isPvpMode: boolean = false
+  public pvpGameMode: '2P' | '4P' = '2P'
+  public allowDonden: boolean = false
   public isPvpHost: boolean = true
   public pvpRoundSeed: number = 0
   public pvpBetChips: number = 20
   public pvpPlayerChips: number = 1000
   public pvpOpponentChips: number = 1000
   public pvpOpponentName: string = '电脑'
+  public seats4P: FourPlayerSeatState[] = []
+  public mySeatIndex: number = 0
+  public activeTurnSeat: number = 0
   public abortCurrentRound: boolean = false
 
   public onUIUpdate?: () => void
@@ -2059,23 +2081,71 @@ export class CGame {
     this.m_pBot.m_pOpponent = this.m_pPlayer
   }
 
-  startPvpMatchNow(payload: {
-    roomSeed: number
-    betAmount: number
-    hostPeerId: string
-    hostGirl: number
-    guestGirl: number
-    hostName: string
-    guestName: string
-  }): void {
+  startPvpMatchNow(payload: StartMatchPayload): void {
     this.isPvpMode = true
+    this.pvpGameMode = payload.gameMode || '2P'
+    this.allowDonden = Boolean(payload.allowDonden)
     this.isPvpHost = this.pvpManager ? this.pvpManager.peerId === payload.hostPeerId : true
     this.pvpRoundSeed = payload.roomSeed
     this.pvpBetChips = payload.betAmount || 20
     this.pvpOpponentName = this.isPvpHost ? payload.guestName : payload.hostName
     this.m_iCurGirl = this.isPvpHost ? payload.guestGirl : payload.hostGirl
-    this.m_pPlayer.m_iScore = 24000
-    this.m_pBot.m_iScore = 24000
+
+    // Disable single-player queued cheats in PVP
+    this.forceNextBonusGame = false
+    this.forceNextSanGenRush = false
+    this.forceNextFirstChance = false
+    this.forceNextReachBonus = false
+    this.m_fReachBonus = false
+
+    // In PVP: fair mode disables DONDEN (0), arcade mode allows 1 DONDEN in 2P
+    this.m_iTotalDonDen = this.allowDonden && this.pvpGameMode === '2P' ? 1 : 0
+    this.m_iDonDen = 0
+
+    // Setup 2P / 4P seats
+    const myPeerId = this.pvpManager?.peerId || ''
+    const rawSeats = payload.seats && payload.seats.length > 0
+      ? payload.seats
+      : [
+          { seatIndex: 0, peerId: payload.hostPeerId, name: payload.hostName, girl: payload.hostGirl, isBot: false },
+          { seatIndex: 1, peerId: 'guest', name: payload.guestName, girl: payload.guestGirl, isBot: false },
+        ]
+
+    const foundMySeat = rawSeats.findIndex((s) => s.peerId === myPeerId)
+    this.mySeatIndex = foundMySeat >= 0 ? foundMySeat : this.isPvpHost ? 0 : 1
+
+    this.seats4P = rawSeats.map((s, idx) => {
+      const pObj: CBasePlayer = idx === this.mySeatIndex ? this.m_pPlayer : new CBot(this.gpGeneral, this)
+      pObj.m_iScore = this.pvpGameMode === '4P' ? 25000 : 24000
+      pObj.m_iTurn = idx === 0 ? TURN_EAST : TURN_SOUTH
+      return {
+        ...s,
+        seatIndex: idx,
+        score: this.pvpGameMode === '4P' ? 25000 : 24000,
+        chips: 1000,
+        playerObj: pObj,
+      }
+    })
+
+    if (this.pvpGameMode === '4P') {
+      // Link opponents in ring
+      for (let i = 0; i < this.seats4P.length; i++) {
+        const nextIdx = (i + 1) % this.seats4P.length
+        this.seats4P[i].playerObj.m_pOpponent = this.seats4P[nextIdx].playerObj
+      }
+      const oppSeat = this.seats4P[(this.mySeatIndex + 2) % this.seats4P.length] || this.seats4P[1]
+      if (oppSeat) {
+        this.m_pBot = oppSeat.playerObj as CBot
+        this.pvpOpponentName = oppSeat.name
+        this.m_iCurGirl = oppSeat.girl
+      }
+    } else {
+      this.m_pPlayer.m_pOpponent = this.m_pBot
+      this.m_pBot.m_pOpponent = this.m_pPlayer
+      this.m_pPlayer.m_iScore = 24000
+      this.m_pBot.m_iScore = 24000
+    }
+
     this.m_iNumDeal = 0
     this.m_iPendingPoint = 0
     this.abortCurrentRound = true
@@ -2083,13 +2153,34 @@ export class CGame {
     this.notifyUI()
   }
 
-  switchToAiTakeover(): void {
+  switchToAiTakeover(disconnectedPeerId?: string): void {
     if (!this.isPvpMode) return
+    if (this.pvpGameMode === '4P' && this.seats4P.length === 4) {
+      let anyHumanLeft = false
+      for (const s of this.seats4P) {
+        if (s.seatIndex !== this.mySeatIndex) {
+          if (!disconnectedPeerId || s.peerId === disconnectedPeerId) {
+            s.isBot = true
+            if (!s.name.includes('AI')) s.name = `${s.name}(AI托管)`
+          }
+          if (!s.isBot) anyHumanLeft = true
+        }
+      }
+      if (!anyHumanLeft) {
+        // Still keep 4P table running with 3 AI bots!
+      }
+      if (this.pvpManager) {
+        this.pvpManager.sendPvpMove({ phase: 'DRAW', act: playeraction.PA_DRAW })
+      }
+      this.notifyUI()
+      return
+    }
+
     this.isPvpMode = false
+    this.m_iTotalDonDen = 8
     this.pvpOpponentName = '电脑(AI托管)'
     setGameSeed(null)
     if (this.pvpManager) {
-      // Unblock if CBot is waiting on a move
       this.pvpManager.sendPvpMove({ phase: 'DRAW', act: playeraction.PA_DRAW })
     }
     this.notifyUI()
@@ -2112,23 +2203,55 @@ export class CGame {
         await this.SelectCurGirl()
       }
       if (!this.isPvpMode) {
+        this.m_iTotalDonDen = 8
         this.GameInit()
       }
       while (true) {
         this.abortCurrentRound = false
-        await this.NewRound()
-        if (this.abortCurrentRound) continue
-        await this.PlayRound()
-        if (this.abortCurrentRound) continue
+        if (this.isPvpMode && this.pvpGameMode === '4P') {
+          await this.NewRound4P()
+          if (this.abortCurrentRound) continue
+          await this.PlayRound4P()
+          if (this.abortCurrentRound) continue
 
-        if (this.m_pPlayer.m_iScore <= 0) {
-          await this.gpGeneral.GameOver()
-          this.m_iTotalScore = 0
-          break
-        } else if (this.m_pBot.m_iScore <= 0) {
-          this.m_iTotalScore += this.m_pPlayer.m_iScore
-          await this.StageClear()
-          break
+          const busted = this.seats4P.find((s) => s.playerObj.m_iScore <= 0)
+          if (busted) {
+            if (busted.seatIndex !== this.mySeatIndex) {
+              await this.HighScore()
+            } else {
+              await this.gpGeneral.GameOver()
+            }
+            for (const s of this.seats4P) {
+              s.playerObj.m_iScore = 25000
+              s.score = 25000
+            }
+            break
+          }
+        } else {
+          await this.NewRound()
+          if (this.abortCurrentRound) continue
+          await this.PlayRound()
+          if (this.abortCurrentRound) continue
+
+          if (this.m_pPlayer.m_iScore <= 0) {
+            await this.gpGeneral.GameOver()
+            this.m_iTotalScore = 0
+            if (this.isPvpMode) {
+              this.m_pPlayer.m_iScore = 24000
+              this.m_pBot.m_iScore = 24000
+            }
+            break
+          } else if (this.m_pBot.m_iScore <= 0) {
+            this.m_iTotalScore += this.m_pPlayer.m_iScore
+            if (this.isPvpMode) {
+              await this.HighScore()
+              this.m_pPlayer.m_iScore = 24000
+              this.m_pBot.m_iScore = 24000
+            } else {
+              await this.StageClear()
+            }
+            break
+          }
         }
       }
     }
@@ -2726,5 +2849,411 @@ export class CGame {
     }
     if (reach && this.m_Dora[5].Dora().equals(t)) d++
     return d
+  }
+
+  // =========================================================
+  // 4-Player Ring Table Mahjong Engine (4P East/South/West/North)
+  // =========================================================
+  async NewRound4P(): Promise<void> {
+    if (this.seats4P.length < 4) return
+    this.pvpManager?.clearMoveQueue()
+    setGameSeed(this.pvpRoundSeed + this.m_iNumDeal * 10007)
+    CTile.NewRound()
+
+    for (let i = 0; i < 6; i++) {
+      this.m_Dora[i] = CTile.RandomTile()
+    }
+
+    const dealerSeat = this.m_iNumDeal % 4
+    for (let i = 0; i < 4; i++) {
+      const s = this.seats4P[i]
+      s.playerObj.NewRound()
+      s.playerObj.m_iTurn = i === dealerSeat ? TURN_EAST : TURN_SOUTH
+      s.playerObj.GetHand()
+      s.playerObj.m_Hand.Sort()
+    }
+
+    this.m_iDonDen = 0
+    this.m_iKongs = 0
+    this.m_fReachBonus = false
+    this.activeTurnSeat = dealerSeat
+
+    this.gpGeneral.PlayBGMusic(0)
+    await this.gpGeneral.DrawBGFade(this.m_iCurGirl, 1)
+    if (this.abortCurrentRound) return
+    await this.gpGeneral.UTIL_Delay(350)
+    if (this.abortCurrentRound) return
+
+    this.gpGeneral.PlaySound(SoundId.SND_BOOM)
+    this.DrawTable4P(dealerSeat, false)
+    this.notifyUI()
+  }
+
+  DrawTable4P(activeSeat: number = 0, showAllHands: boolean = false): void {
+    if (this.seats4P.length < 4) return
+    this.gpGeneral.DrawBG(this.m_iCurGirl, 0)
+    const ctx = this.gpGeneral.ctx
+
+    // Relative seats from local player's perspective:
+    // rel 0 = Bottom (Self), rel 1 = Right (下家), rel 2 = Top (对家), rel 3 = Left (上家)
+    const seatBottom = this.seats4P[this.mySeatIndex]
+    const seatRight = this.seats4P[(this.mySeatIndex + 1) % 4]
+    const seatTop = this.seats4P[(this.mySeatIndex + 2) % 4]
+    const seatLeft = this.seats4P[(this.mySeatIndex + 3) % 4]
+
+    // 1. Draw Bottom (Local Player) Hand & Melds
+    this.m_pPlayer.DrawHand(showAllHands)
+
+    // Draw Bottom Discard River (centered x: 188..440, y: 282..354, 6 per row)
+    for (let i = 0; i < seatBottom.playerObj.m_iNumDiscarded && i < 18; i++) {
+      const col = i % 6
+      const row = Math.floor(i / 6)
+      const x = 194 + col * 38
+      const y = 278 + row * 34
+      this.gpGeneral.DrawTile(seatBottom.playerObj.m_Discarded[i].tile, x, y, TileDir.WALL_SHOWN, 0)
+    }
+
+    // 2. Draw Top (Opposite Player) Hand & Discard River
+    const topP = seatTop.playerObj
+    const topCount = Math.min(13, topP.m_Hand.m_iNumTiles)
+    for (let i = 0; i < topCount; i++) {
+      const x = 445 - i * 30
+      this.gpGeneral.DrawTile(
+        topP.m_Hand.m_Tiles[i].tile,
+        x,
+        8,
+        showAllHands ? TileDir.WALL_SHOWN : TileDir.WALL_CONCEALED,
+        0
+      )
+    }
+    for (let i = 0; i < topP.m_iNumDiscarded && i < 18; i++) {
+      const col = i % 6
+      const row = Math.floor(i / 6)
+      const x = 384 - col * 38
+      const y = 112 - row * 32
+      this.gpGeneral.DrawTile(topP.m_Discarded[i].tile, x, y, TileDir.WALL_SHOWN, 0)
+    }
+
+    // 3. Draw Left (上家) Vertical Hand & Discard River
+    const leftP = seatLeft.playerObj
+    const leftCount = Math.min(13, leftP.m_Hand.m_iNumTiles)
+    for (let i = 0; i < leftCount; i++) {
+      const y = 68 + i * 21
+      if (showAllHands) {
+        this.gpGeneral.DrawTile(leftP.m_Hand.m_Tiles[i].tile, 10, y, TileDir.WALL_SHOWN, 0)
+      } else {
+        this.gpGeneral.DrawTile(new CTile(0), 10, y, TileDir.WALL_CONCEALED, 0)
+      }
+    }
+    for (let i = 0; i < leftP.m_iNumDiscarded && i < 18; i++) {
+      const row = i % 6
+      const col = Math.floor(i / 6)
+      const x = 56 + col * 38
+      const y = 115 + row * 34
+      this.gpGeneral.DrawTile(leftP.m_Discarded[i].tile, x, y, TileDir.WALL_SHOWN, 0)
+    }
+
+    // 4. Draw Right (下家) Vertical Hand & Discard River
+    const rightP = seatRight.playerObj
+    const rightCount = Math.min(13, rightP.m_Hand.m_iNumTiles)
+    for (let i = 0; i < rightCount; i++) {
+      const y = 320 - i * 21
+      if (showAllHands) {
+        this.gpGeneral.DrawTile(rightP.m_Hand.m_Tiles[i].tile, 594, y, TileDir.WALL_SHOWN, 0)
+      } else {
+        this.gpGeneral.DrawTile(new CTile(0), 594, y, TileDir.WALL_CONCEALED, 0)
+      }
+    }
+    for (let i = 0; i < rightP.m_iNumDiscarded && i < 18; i++) {
+      const row = i % 6
+      const col = Math.floor(i / 6)
+      const x = 546 - col * 38
+      const y = 285 - row * 34
+      this.gpGeneral.DrawTile(rightP.m_Discarded[i].tile, x, y, TileDir.WALL_SHOWN, 0)
+    }
+
+    // 5. Draw Center 4P Compass & Scoreboard Box (x: 182, y: 152, w: 276, h: 120)
+    ctx.save()
+    ctx.fillStyle = 'rgba(8, 22, 18, 0.88)'
+    ctx.strokeStyle = '#f59e0b'
+    ctx.lineWidth = 2
+    ctx.fillRect(182, 152, 276, 120)
+    ctx.strokeRect(182, 152, 276, 120)
+
+    const windNames = ['东', '南', '西', '北']
+    const dealerSeat = this.m_iNumDeal % 4
+    ctx.font = 'bold 13px "WeimzhKai", "Microsoft YaHei", sans-serif'
+    ctx.fillStyle = '#fde047'
+    ctx.fillText(
+      `🀄 四人麻将 · 东${(this.m_iNumDeal % 4) + 1}局 | 余牌: ${Math.max(0, CTile.TotalRemainingTiles() - 14)}`,
+      192,
+      171
+    )
+
+    // Draw Dora Indicator inside center box right
+    ctx.fillStyle = '#94a3b8'
+    ctx.font = '12px "Microsoft YaHei", sans-serif'
+    ctx.fillText('宝牌:', 385, 192)
+    this.gpGeneral.DrawTile(this.m_Dora[0], 418, 174, TileDir.WALL_SHOWN, 0)
+
+    // Draw 4 Seats Status in Center Compass
+    const seatCoords = [
+      { seat: seatBottom, label: '下(我)', x: 192, y: 258 },
+      { seat: seatRight, label: '右(下家)', x: 192, y: 238 },
+      { seat: seatTop, label: '上(对家)', x: 192, y: 198 },
+      { seat: seatLeft, label: '左(上家)', x: 192, y: 218 },
+    ]
+
+    for (const item of seatCoords) {
+      const s = item.seat
+      const isTurn = s.seatIndex === activeSeat
+      const windChar = windNames[(s.seatIndex - dealerSeat + 4) % 4]
+      ctx.font = isTurn ? 'bold 13px "Microsoft YaHei", sans-serif' : '12px "Microsoft YaHei", sans-serif'
+      ctx.fillStyle = isTurn ? '#4ade80' : '#e2e8f0'
+      const reachTag = s.playerObj.m_fReach ? ' [立直]' : ''
+      const turnArrow = isTurn ? '▶ ' : '   '
+      const shortName = s.name.length > 7 ? s.name.slice(0, 7) : s.name
+      ctx.fillText(
+        `${turnArrow}[${windChar}] ${shortName}: ${s.playerObj.m_iScore}点${reachTag}`,
+        item.x,
+        item.y
+      )
+    }
+    ctx.restore()
+  }
+
+  async PlayRound4P(): Promise<void> {
+    if (this.seats4P.length < 4) return
+    let turnSeat = this.m_iNumDeal % 4
+    let pWinnerSeat: FourPlayerSeatState | null = null
+    let pLoserSeat: FourPlayerSeatState | null = null
+    let isTsumo = false
+
+    while (pWinnerSeat === null && CTile.TotalRemainingTiles() > 14) {
+      if (this.abortCurrentRound) return
+      const curSeatObj = this.seats4P[turnSeat]
+      const curPlayer = curSeatObj.playerObj
+      this.activeTurnSeat = turnSeat
+
+      // 1. Draw Tile if not jumping from Pung/Chow
+      if (!(curPlayer.m_iState & playerstate_flags.PS_ASKED)) {
+        for (let i = 0; i < curPlayer.m_Hand.m_iNumTiles; i++) {
+          curPlayer.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+        }
+        curPlayer.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
+        this.gpGeneral.PlaySound(SoundId.SND_DISCARD1)
+      }
+      curPlayer.m_iState &= ~playerstate_flags.PS_ASKED
+
+      this.DrawTable4P(turnSeat, false)
+      this.notifyUI()
+
+      // 2. Discard / Tsumo / Kong / Reach Decision
+      let discardAct = playeraction.PA_DISCARD
+      if (turnSeat === this.mySeatIndex) {
+        discardAct = await this.m_pPlayer.Action(actionstate.AS_DISCARD)
+        if (this.abortCurrentRound) return
+      } else if (!curSeatObj.isBot && this.pvpManager) {
+        const move = await this.pvpManager.waitForOpponentMove()
+        if (this.abortCurrentRound) return
+        if (move.act === playeraction.PA_MAHJONG) {
+          discardAct = playeraction.PA_MAHJONG
+        } else if (move.act === playeraction.PA_KONG) {
+          const idx = move.index ?? 0
+          if (curPlayer.m_Hand.Kong(curPlayer.m_Hand.m_Tiles[idx].tile, false)) {
+            curPlayer.m_iState |= playerstate_flags.PS_KONGED
+            discardAct = playeraction.PA_KONG
+          }
+        } else {
+          const idx = Math.min(curPlayer.m_Hand.m_iNumTiles - 1, Math.max(0, move.index ?? curPlayer.m_Hand.m_iNumTiles - 1))
+          discardAct = move.act === playeraction.PA_REACH ? playeraction.PA_REACH : playeraction.PA_DISCARD
+          if (discardAct === playeraction.PA_REACH) {
+            curPlayer.m_fReach = true
+            curPlayer.m_iState = playerstate_flags.PS_CALLREACH
+          }
+          curPlayer.m_Discarded[curPlayer.m_iNumDiscarded] = {
+            tile: curPlayer.m_Hand.m_Tiles[idx].tile.clone(),
+            flags: discardAct === playeraction.PA_REACH ? discarded_flags.DT_REACH : 0,
+          }
+          curPlayer.m_iNumDiscarded++
+          curPlayer.m_Hand.RemoveTile(idx)
+          for (let i = 0; i < curPlayer.m_Hand.m_iNumTiles; i++) {
+            curPlayer.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+          }
+          curPlayer.m_Hand.Sort()
+        }
+      } else {
+        // AI Bot Turn in 4P Mode (Deterministic on all clients via shared seed)
+        await this.gpGeneral.UTIL_Delay(320)
+        if (this.abortCurrentRound) return
+        if (curPlayer.ActionIsValid(actionstate.AS_DISCARD, playeraction.PA_MAHJONG)) {
+          discardAct = playeraction.PA_MAHJONG
+        } else {
+          const botObj = curPlayer as CBot
+          const bestIdx = botObj.pickBestDiscardIndexPublic()
+          if (!curPlayer.m_fReach && curPlayer.m_Hand.IsConcealed() && curPlayer.m_iNumDiscarded < 16) {
+            const tmp = curPlayer.m_Hand.clone()
+            tmp.RemoveTile(bestIdx)
+            if (tmp.IsReady() && RandomLong(1, 100) < 65) {
+              discardAct = playeraction.PA_REACH
+              curPlayer.m_fReach = true
+              curPlayer.m_iState = playerstate_flags.PS_CALLREACH
+            }
+          }
+          curPlayer.m_Discarded[curPlayer.m_iNumDiscarded] = {
+            tile: curPlayer.m_Hand.m_Tiles[bestIdx].tile.clone(),
+            flags: discardAct === playeraction.PA_REACH ? discarded_flags.DT_REACH : 0,
+          }
+          curPlayer.m_iNumDiscarded++
+          curPlayer.m_Hand.RemoveTile(bestIdx)
+          for (let i = 0; i < curPlayer.m_Hand.m_iNumTiles; i++) {
+            curPlayer.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+          }
+          curPlayer.m_Hand.Sort()
+        }
+      }
+
+      if (discardAct === playeraction.PA_MAHJONG) {
+        pWinnerSeat = curSeatObj
+        isTsumo = true
+        break
+      } else if (discardAct === playeraction.PA_KONG) {
+        this.m_iKongs = Math.min(4, this.m_iKongs + 1)
+        this.gpGeneral.PlaySound(SoundId.SND_SOUND3)
+        continue
+      } else if (discardAct === playeraction.PA_REACH) {
+        this.gpGeneral.PlaySound(SoundId.SND_REACH)
+        curPlayer.m_iScore -= 1000
+        curSeatObj.score = curPlayer.m_iScore
+        this.m_iPendingPoint += 1000
+      }
+
+      this.gpGeneral.PlaySound(SoundId.SND_DISCARD2)
+      this.DrawTable4P(turnSeat, false)
+      this.notifyUI()
+
+      // 3. 4-Player Claim / Interception Window (Ron > Kong/Pung > Next-Seat Chow)
+      let claimedBySeat = -1
+      let claimedAct = playeraction.PA_NONE
+
+      for (let offset = 1; offset <= 3; offset++) {
+        const checkSeatIdx = (turnSeat + offset) % 4
+        const checkSeatObj = this.seats4P[checkSeatIdx]
+        const checkP = checkSeatObj.playerObj
+        checkP.m_pOpponent = curPlayer
+
+        const canRon = checkP.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_MAHJONG)
+        const canKong = checkP.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_KONG)
+        const canPung = checkP.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_PUNG)
+        const canChow = offset === 1 && checkP.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_CHOW)
+
+        if (!canRon && !canKong && !canPung && !canChow) continue
+
+        if (checkSeatIdx === this.mySeatIndex) {
+          // Local player has a valid claim opportunity!
+          const act = await this.m_pPlayer.Action(actionstate.AS_DRAW)
+          if (this.abortCurrentRound) return
+          if (act === playeraction.PA_MAHJONG || act === playeraction.PA_KONG || act === playeraction.PA_PUNG || act === playeraction.PA_CHOW) {
+            claimedBySeat = checkSeatIdx
+            claimedAct = act
+            if (act === playeraction.PA_MAHJONG) break
+          }
+        } else if (checkSeatObj.isBot) {
+          if (canRon) {
+            checkP.m_Hand.AddTile(curPlayer.LastDiscardedTile())
+            claimedBySeat = checkSeatIdx
+            claimedAct = playeraction.PA_MAHJONG
+            break
+          }
+        }
+      }
+
+      if (claimedBySeat >= 0 && claimedAct !== playeraction.PA_NONE) {
+        if (claimedAct === playeraction.PA_MAHJONG) {
+          pWinnerSeat = this.seats4P[claimedBySeat]
+          pLoserSeat = curSeatObj
+          isTsumo = false
+          break
+        } else if (claimedAct === playeraction.PA_KONG) {
+          this.m_iKongs = Math.min(4, this.m_iKongs + 1)
+          this.gpGeneral.PlaySound(SoundId.SND_SOUND3)
+          turnSeat = claimedBySeat
+          continue
+        } else if (claimedAct === playeraction.PA_PUNG || claimedAct === playeraction.PA_CHOW) {
+          this.gpGeneral.PlaySound(SoundId.SND_SOUND3)
+          turnSeat = claimedBySeat
+          this.seats4P[claimedBySeat].playerObj.m_iState |= playerstate_flags.PS_ASKED
+          continue
+        }
+      }
+
+      turnSeat = (turnSeat + 1) % 4
+    }
+
+    // 4. 4-Player Settlement (Draw or Win)
+    if (pWinnerSeat === null) {
+      await this.gpGeneral.UTIL_Delay(600)
+      this.DrawTable4P(turnSeat, true)
+      this.gpGeneral.PlaySound(SoundId.SND_DISCARD2)
+      this.gpGeneral.DrawUTF8Text(msg('round_draw'), 220, 190, 2, 255, 100, 255)
+      this.m_iNumDeal++
+      await this.gpGeneral.UTIL_Delay(2200)
+    } else {
+      const winP = pWinnerSeat.playerObj
+      winP.m_Hand.GoMahjong()
+      winP.CalcResult()
+
+      if (pWinnerSeat.seatIndex === this.mySeatIndex) {
+        const t = winP.m_Hand.m_Tiles[winP.m_Hand.m_iNumTiles - 1].tile.clone()
+        if (isTsumo) {
+          await this.gpGeneral.AnimSelfDrawn(t)
+        } else {
+          await this.gpGeneral.AnimOut(t)
+        }
+      }
+
+      this.gpGeneral.PlayBGMusic(-1)
+      this.gpGeneral.PlayWinMusic()
+      this.DrawTable4P(pWinnerSeat.seatIndex, true)
+      await this.gpGeneral.UTIL_Delay(2000)
+
+      this.gpGeneral.DrawBG(pWinnerSeat.girl, 1)
+      this.m_pPlayer.DrawHand(true)
+      winP.DrawResult()
+
+      const winScore = winP.m_Result.score
+      const fanCount = Math.max(1, winP.HasFan())
+      const chipDelta = this.pvpBetChips * fanCount
+
+      if (isTsumo) {
+        const eachPay = Math.floor(winScore / 3 / 100) * 100
+        for (const s of this.seats4P) {
+          if (s.seatIndex === pWinnerSeat.seatIndex) {
+            s.playerObj.m_iScore += eachPay * 3 + this.m_iPendingPoint
+            s.chips += chipDelta * 3
+          } else {
+            s.playerObj.m_iScore -= eachPay
+            s.chips = Math.max(0, s.chips - chipDelta)
+          }
+          s.score = s.playerObj.m_iScore
+        }
+      } else if (pLoserSeat) {
+        pWinnerSeat.playerObj.m_iScore += winScore + this.m_iPendingPoint
+        pWinnerSeat.score = pWinnerSeat.playerObj.m_iScore
+        pWinnerSeat.chips += chipDelta
+        pLoserSeat.playerObj.m_iScore -= winScore
+        pLoserSeat.score = pLoserSeat.playerObj.m_iScore
+        pLoserSeat.chips = Math.max(0, pLoserSeat.chips - chipDelta)
+      }
+
+      this.m_iPendingPoint = 0
+      this.pvpPlayerChips = this.seats4P[this.mySeatIndex]?.chips ?? 1000
+      this.gpGeneral.PlaySound(SoundId.SND_SOUND1)
+      this.notifyUI()
+      await this.gpGeneral.UTIL_Delay(3200)
+      this.m_iNumDeal++
+    }
+
+    await this.gpGeneral.ScreenFade(400)
   }
 }

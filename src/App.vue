@@ -13,13 +13,26 @@
           <span class="logo-en">WEIMZH ARCADE · PVP REBORN</span>
         </div>
 
-        <!-- Mode Badge: PVE vs 1v1 PVP -->
+        <!-- Mode Badge: PVE vs 2P/4P Public PVP -->
         <div class="mode-badge" :class="{ pvp: isPvpMode || isRoomConnected }">
           <span class="mode-dot"></span>
-          <span>{{ isPvpMode ? `🟢 1v1 真人联机 (#${roomId})` : isRoomConnected ? `🟡 好友已进房 (#${roomId})` : '🕹️ 单机闯关模式 (PVE)' }}</span>
+          <span>{{
+            isPvpMode
+              ? pvpGameMode === '4P'
+                ? `🀄 四人麻将联机 (#${roomId})`
+                : `🟢 1v1 真人联机 (#${roomId})`
+              : isRoomConnected
+              ? `🟡 雀友已进房 (#${roomId})`
+              : '🕹️ 单机闯关模式 (PVE)'
+          }}</span>
         </div>
 
-        <div class="stage-pill" v-if="curGirl >= 0">
+        <div v-if="roomId" class="stage-pill">
+          <span class="pill-tag">{{ publicConnected ? '🌐 公网已连通' : '📡 局域网/本地' }}</span>
+          <span class="pill-name">{{ allowDonden ? '🎪 街机娱乐' : '🏆 公平竞技' }}</span>
+        </div>
+
+        <div class="stage-pill" v-else-if="curGirl >= 0">
           <span class="pill-tag">{{ isPvpMode ? '对手形象' : `STAGE ${String.fromCharCode(65 + curGirl)}` }}</span>
           <span class="pill-name">{{ girlNames[curGirl] }}</span>
         </div>
@@ -70,7 +83,7 @@
 
         <!-- PRD 4.4: Prominent Guandan-style 1-Click Invite Capsule Button -->
         <button class="sys-btn invite-capsule" @click.stop="openInviteModal">
-          🤝 邀请好友对战 {{ roomPeersCount > 1 ? `(${roomPeersCount}/2 在线)` : '' }}
+          🤝 公网/好友联机 {{ roomPeersCount > 1 ? `(${roomPeersCount}/${pvpGameMode === '4P' ? 4 : 2} 在线)` : '' }}
         </button>
 
         <button class="sys-btn" :class="{ off: !musicOn }" @click.stop="toggleMusic">
@@ -89,14 +102,14 @@
     <transition name="fade">
       <div v-if="showPvpHandoverBanner && !isPvpMode" class="pvp-handover-banner">
         <div class="banner-left">
-          <span class="pulse-badge">🎉 好友已进房</span>
+          <span class="pulse-badge">🎉 雀友已进房 ({{ roomPeersCount }}人)</span>
           <span class="banner-txt">
-            好友 <strong>【{{ opponentName }}】</strong> 已通过邀请链接进入房间 (#{{ roomId }})，语音通道已默认连通！
+            好友 <strong>【{{ opponentName }}】</strong> 已进入公网房间 (#{{ roomId }})，语音已默认连通！
           </span>
         </div>
         <div class="banner-actions">
           <button class="handover-btn primary" @click.stop="startPvpImmediately">
-            ⚡ 立即重开 1v1 真人局 (押注 {{ betAmount }} 筹码)
+            ⚡ 立即开局 ({{ pvpGameMode === '4P' ? '🀄 四人麻将·AI补位' : '⚔️ 1v1 真人死斗' }})
           </button>
           <button class="handover-btn secondary" @click.stop="queuePvpAfterRound">
             🀄 打完当前手自动切换
@@ -121,16 +134,30 @@
       <aside class="side-panel left-panel">
         <!-- PVP Live Room & Voice Card -->
         <div class="panel-card pvp-card">
-          <div class="card-title">🌐 1v1 联机房间 & 实时语音</div>
+          <div class="card-title">🌐 公网/局域网房间 & 实时语音</div>
           <div class="room-status-box">
             <div class="r-row">
               <span class="r-lbl">当前房间号:</span>
               <span class="r-val code">#{{ roomId || '未创建' }}</span>
             </div>
             <div class="r-row">
+              <span class="r-lbl">公网通道:</span>
+              <span class="r-val" :class="{ online: publicConnected }">
+                {{ publicStatusText }}
+              </span>
+            </div>
+            <div class="r-row">
               <span class="r-lbl">对战状态:</span>
-              <span class="r-val" :class="{ online: isRoomConnected }">
-                {{ isPvpMode ? '🔥 1v1 真人激战中' : isRoomConnected ? '🟢 好友已就绪' : '🤖 单机 AI 陪练中' }}
+              <span class="r-val" :class="{ online: isRoomConnected || isPvpMode }">
+                {{
+                  isPvpMode
+                    ? pvpGameMode === '4P'
+                      ? '🀄 四人麻将激战中'
+                      : '🔥 1v1 真人激战中'
+                    : isRoomConnected
+                    ? `🟢 ${roomPeersCount}人已就绪`
+                    : '🤖 单机 AI 陪练中'
+                }}
               </span>
             </div>
             <div class="r-row">
@@ -153,9 +180,39 @@
           </div>
         </div>
 
-        <!-- Secret DIP Switches -->
-        <div class="panel-card">
-          <div class="card-title">🕹️ 街机秘技 & 彩蛋开关</div>
+        <!-- In PVP Mode: Auto-replace Cheat Menu with Fair Play Scoreboard -->
+        <div v-if="isPvpMode" class="panel-card pvp-standings-card">
+          <div class="card-title">🏆 联机风位战况榜 ({{ pvpGameMode === '4P' ? '四人环桌' : '二人死斗' }})</div>
+          <div class="seat-standings-list">
+            <div
+              v-for="s in seatsDisplayList"
+              :key="s.seatIndex"
+              class="seat-row"
+              :class="{ active: activeTurnSeat === s.seatIndex, me: s.seatIndex === mySeatIndex }"
+            >
+              <span class="wind-badge">{{ ['东', '南', '西', '北'][s.seatIndex] }}</span>
+              <div class="seat-meta">
+                <div class="seat-name-line">
+                  <span class="s-name">{{ s.name }}</span>
+                  <span class="s-tag" :class="{ bot: s.isBot }">{{ s.isBot ? '🤖AI' : '🟢真人' }}</span>
+                </div>
+                <div class="seat-score-line">
+                  <span>{{ s.score }} 点</span>
+                  <span class="s-chips">🪙 {{ s.chips }}币</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="fair-lock-notice">
+            🔒 <strong>联网防作弊保护中</strong>：单机改牌/必胡/加分秘技已自动锁定（当前规则：{{
+              allowDonden && pvpGameMode === '2P' ? '🎪 允许1次换牌' : '🏆 严禁DONDEN换牌'
+            }}）
+          </div>
+        </div>
+
+        <!-- Secret DIP Switches (Only shown in Single-Player PVE Mode) -->
+        <div v-else class="panel-card">
+          <div class="card-title">🕹️ 街机秘技 & 彩蛋开关 (单机专属)</div>
           <button
             class="dip-btn"
             :class="{ active: bonusQueued }"
@@ -266,13 +323,15 @@
       <!-- Right Stage Switcher & Action Panel -->
       <aside class="side-panel right-panel">
         <div class="panel-card">
-          <div class="card-title">👩 四大原版女主选关</div>
+          <div class="card-title">
+            {{ isPvpMode ? '👩 我的出战代表形象 (联机同步)' : '👩 四大原版女主选关 (单机对手)' }}
+          </div>
           <div class="girl-grid">
             <button
               v-for="(gName, idx) in girlNames"
               :key="idx"
               class="girl-select-btn"
-              :class="{ current: curGirl === idx }"
+              :class="{ current: (isPvpMode ? mySelectedGirl : curGirl) === idx }"
               @click.stop="switchGirl(idx)"
             >
               <span class="g-letter">{{ String.fromCharCode(65 + idx) }}</span>
@@ -321,10 +380,14 @@
             </button>
             <button
               class="act-btn donden"
-              :disabled="dondenLeft <= 0"
+              :disabled="dondenLeft <= 0 || (isPvpMode && (!allowDonden || pvpGameMode === '4P'))"
               @click.stop="sendKey('y')"
             >
-              换 牌 DONDEN [Y]
+              {{
+                isPvpMode && (!allowDonden || pvpGameMode === '4P')
+                  ? '🔒 联机禁换牌 (公平规则)'
+                  : `换 牌 DONDEN [Y] (${dondenLeft})`
+              }}
             </button>
             <button class="act-btn confirm" @click.stop="sendKey('Enter')">
               摸牌 / 确认 [Space/Enter]
@@ -353,37 +416,88 @@
       </div>
     </footer>
 
-    <!-- PRD 4.4: Guandan-style 1-Click Invite & PVP Lobby Modal -->
+    <!-- PRD 4.4: Guandan-style 1-Click Invite & Public 2P/4P PVP Lobby Modal -->
     <transition name="fade">
       <div v-if="showInviteModal" class="modal-backdrop" @click.self="showInviteModal = false">
         <div class="invite-modal">
           <div class="modal-header">
-            <h3>🤝 电子基盘 · 1v1 好友联机开黑房 (#{{ roomId }})</h3>
-            <button class="close-btn" @click="showInviteModal = false">✕</button>
+            <h3>🌐 电子基盘 · 公网跨网 & 四人麻将联机大厅 (#{{ roomId }})</h3>
+            <div class="header-badges">
+              <span class="pub-pill" :class="{ ok: publicConnected }">{{ publicStatusText }}</span>
+              <button class="close-btn" @click="showInviteModal = false">✕</button>
+            </div>
           </div>
 
           <div class="modal-body">
-            <!-- Step 1: Share Link -->
+            <!-- Step 1: Share Link OR Join by 6-Digit Public Room Code -->
             <div class="invite-section">
-              <label class="sec-label">1. 复制专属邀请链接发给微信/QQ好友（或在本机新开标签页测试）：</label>
+              <label class="sec-label">1. 一链入房 / 输入 6 位房间号跨公网直连（支持异地宽带、手机5G、多开窗口）：</label>
               <div class="link-copy-row">
                 <input type="text" readonly :value="inviteUrl" class="link-input" />
                 <button class="copy-primary-btn" @click="copyInviteLink">📋 一键复制链接</button>
-                <button class="open-tab-btn" @click="openSecondTabForTest" title="在同一台电脑直接弹出第二个窗口模拟好友进房对战">
-                  🖥️ 双开窗口测试联机
+                <button class="open-tab-btn" @click="openSecondTabForTest" title="在同一台电脑直接弹出新窗口模拟多位雀友进房对战">
+                  🖥️ 弹出新窗口测试联机
                 </button>
               </div>
-              <div v-if="lanInviteUrl" class="lan-url-row">
-                <span>📱 局域网/手机 Wi-Fi 直连地址：</span>
-                <code>{{ lanInviteUrl }}</code>
-                <button class="mini-copy-btn" @click="copyLanLink">复制局域网链接</button>
+              <div class="join-code-row">
+                <span class="join-lbl">🔑 跨公网加入好友房间号：</span>
+                <input
+                  type="text"
+                  v-model="joinRoomInput"
+                  placeholder="输入6位房间号 (如 884821)"
+                  maxlength="12"
+                  class="room-code-input"
+                />
+                <button class="mini-join-btn" @click="joinCustomRoom">🌐 立即跨网加入该房</button>
+                <span v-if="lanInviteUrl" class="lan-inline">
+                  | 📱 局域网地址: <code>{{ lanInviteUrl }}</code>
+                  <button class="mini-copy-btn" @click="copyLanLink">复制</button>
+                </span>
               </div>
             </div>
 
-            <!-- Step 2: Select Character & Bet Chips (PRD 4.4.2) -->
+            <!-- Step 2: Mode (4P vs 2P) & Fair Rule Switch -->
             <div class="invite-grid-2col">
               <div class="invite-section">
-                <label class="sec-label">2. 选择您的代表角色（败北将触发退阶动画）：</label>
+                <label class="sec-label">2. 选择对局模式与防作弊规则：</label>
+                <div class="mode-switch-grid">
+                  <button
+                    class="rule-card-btn"
+                    :class="{ selected: pvpGameMode === '4P' }"
+                    @click="setGameMode('4P')"
+                  >
+                    <div class="rc-title">🀄 四人环桌麻将 (4P 东南西北)</div>
+                    <div class="rc-desc">支持 1~4 名真人同桌，空位由街机 AI 自动补齐</div>
+                  </button>
+                  <button
+                    class="rule-card-btn"
+                    :class="{ selected: pvpGameMode === '2P' }"
+                    @click="setGameMode('2P')"
+                  >
+                    <div class="rc-title">⚔️ 二人街机死斗 (1v1 经典)</div>
+                    <div class="rc-desc">原版电子基盘二人对坐、17列牌河满贯死斗</div>
+                  </button>
+                </div>
+
+                <div class="rule-toggle-row" style="margin-top: 8px;">
+                  <button
+                    class="fair-btn"
+                    :class="{ selected: !allowDonden }"
+                    @click="setAllowDonden(false)"
+                  >
+                    🏆 公平竞技 (禁DONDEN换牌/禁秘技)
+                  </button>
+                  <button
+                    class="fair-btn"
+                    :class="{ selected: allowDonden }"
+                    :disabled="pvpGameMode === '4P'"
+                    @click="setAllowDonden(true)"
+                  >
+                    🎪 街机娱乐 (1v1限1次DONDEN换牌)
+                  </button>
+                </div>
+
+                <label class="sec-label" style="margin-top: 10px;">3. 选择您的出战代表角色（实时同步）：</label>
                 <div class="modal-girl-selector">
                   <button
                     v-for="(gName, idx) in girlShortNames"
@@ -399,7 +513,7 @@
               </div>
 
               <div class="invite-section">
-                <label class="sec-label">3. 本局押注筹码 (10 ~ 99 币，番数翻倍结算)：</label>
+                <label class="sec-label">4. 本局押注筹码 (10 ~ 99 币，番数翻倍结算)：</label>
                 <div class="bet-selector-box">
                   <input
                     type="range"
@@ -412,15 +526,29 @@
                   <div class="bet-display">当前押注: <strong>{{ betAmount }}</strong> 筹码/番</div>
                 </div>
 
-                <label class="sec-label" style="margin-top: 12px;">4. 房间内在线玩家 ({{ roomPeers.length }}/2)：</label>
+                <label class="sec-label" style="margin-top: 12px;">
+                  5. 房间座位席 ({{ roomPeers.length }}/{{ pvpGameMode === '4P' ? 4 : 2 }} 真人在线，空位由 AI 自动补位)：
+                </label>
                 <div class="roster-list">
-                  <div v-for="p in roomPeers" :key="p.peerId" class="roster-item">
-                    <span class="r-dot">🟢</span>
-                    <span class="r-name">{{ p.name }} {{ p.peerId === myPeerId ? '(我)' : '(好友)' }}</span>
-                    <span class="r-char">角色: {{ girlShortNames[p.girl] || '结衣' }}</span>
-                  </div>
-                  <div v-if="roomPeers.length < 2" class="roster-waiting">
-                    ⏳ 等待好友点击链接进入房间（进房默认开启实时语音）...
+                  <div
+                    v-for="seatIdx in (pvpGameMode === '4P' ? [0, 1, 2, 3] : [0, 1])"
+                    :key="seatIdx"
+                    class="roster-item"
+                  >
+                    <span class="wind-pill">{{ ['东', '南', '西', '北'][seatIdx] }}</span>
+                    <template v-if="roomPeers[seatIdx]">
+                      <span class="r-dot">🟢</span>
+                      <span class="r-name">
+                        {{ roomPeers[seatIdx].name }}
+                        {{ roomPeers[seatIdx].peerId === myPeerId ? '(我)' : '(真人雀友)' }}
+                      </span>
+                      <span class="r-char">角色: {{ girlShortNames[roomPeers[seatIdx].girl] || '结衣' }}</span>
+                    </template>
+                    <template v-else>
+                      <span class="r-dot">🤖</span>
+                      <span class="r-name bot-slot">电脑 AI 自动补位 ({{ girlShortNames[(mySelectedGirl + seatIdx) % 4] }})</span>
+                      <span class="r-char">待好友进房顶替</span>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -429,14 +557,20 @@
 
           <div class="modal-footer">
             <button class="modal-btn cancel" @click="showInviteModal = false">
-              先玩单机 (好友进房自动提醒)
+              返回单机 (好友进房自动提醒)
             </button>
             <button
               class="modal-btn start-pvp"
-              :disabled="roomPeers.length < 2"
+              :disabled="pvpGameMode === '2P' && roomPeers.length < 2"
               @click="startPvpImmediately"
             >
-              ⚡ {{ roomPeers.length >= 2 ? '好友已就绪！立即开始 1v1 真人局' : '等待好友进房后可开局' }}
+              ⚡ {{
+                pvpGameMode === '4P'
+                  ? `立即开局四人麻将 (${roomPeers.length}真人 + ${Math.max(0, 4 - roomPeers.length)}AI补位)`
+                  : roomPeers.length >= 2
+                  ? '好友已就绪！立即开始 1v1 真人局'
+                  : '1v1 模式等待第 2 位好友进房 (或切换上方四人模式含AI立即开局)'
+              }}
             </button>
           </div>
         </div>
@@ -467,16 +601,26 @@ const dondenLeft = ref(8)
 
 // PVP & Voice Reactive State
 const roomId = ref('')
+const joinRoomInput = ref('')
 const myPeerId = ref('')
 const myName = ref('街机雀神')
 const opponentName = ref('电脑')
 const isRoomConnected = ref(false)
 const isPvpMode = ref(false)
+const pvpGameMode = ref<'2P' | '4P'>('4P')
+const allowDonden = ref(false)
+const publicConnected = ref(false)
+const publicStatusText = ref('🌐 公网待机')
 const showInviteModal = ref(false)
 const showPvpHandoverBanner = ref(false)
 const queuePvpNextRound = ref(false)
 const roomPeers = ref<PvpPeerInfo[]>([])
 const lanIps = ref<string[]>([])
+const mySeatIndex = ref(0)
+const activeTurnSeat = ref(0)
+const seatsDisplayList = ref<
+  { seatIndex: number; name: string; girl: number; isBot: boolean; score: number; chips: number }[]
+>([])
 
 const mySelectedGirl = ref(2)
 const betAmount = ref(20)
@@ -552,9 +696,29 @@ const syncUIState = () => {
   botScore.value = game.m_pBot.m_iScore
   dondenLeft.value = Math.max(0, game.m_iTotalDonDen - game.m_iDonDen)
   isPvpMode.value = game.isPvpMode
+  pvpGameMode.value = game.isPvpMode ? game.pvpGameMode : pvp.gameMode
+  allowDonden.value = game.isPvpMode ? game.allowDonden : pvp.allowDonden
   opponentName.value = game.pvpOpponentName
   playerChips.value = game.pvpPlayerChips
   opponentChips.value = game.pvpOpponentChips
+  mySeatIndex.value = game.mySeatIndex
+  activeTurnSeat.value = game.activeTurnSeat
+
+  if (game.isPvpMode && game.seats4P.length > 0) {
+    seatsDisplayList.value = game.seats4P.map((s) => ({
+      seatIndex: s.seatIndex,
+      name: s.name,
+      girl: s.girl,
+      isBot: s.isBot,
+      score: s.playerObj.m_iScore,
+      chips: s.chips,
+    }))
+  } else if (game.isPvpMode) {
+    seatsDisplayList.value = [
+      { seatIndex: 0, name: myName.value, girl: mySelectedGirl.value, isBot: false, score: game.m_pPlayer.m_iScore, chips: game.pvpPlayerChips },
+      { seatIndex: 1, name: game.pvpOpponentName, girl: game.m_iCurGirl, isBot: false, score: game.m_pBot.m_iScore, chips: game.pvpOpponentChips },
+    ]
+  }
 
   bonusQueued.value = game.forceNextBonusGame
   sangenQueued.value = game.forceNextSanGenRush
@@ -723,8 +887,31 @@ const selectMyPvpGirl = (idx: number) => {
   syncMyMeta()
 }
 
+const setGameMode = (mode: '2P' | '4P') => {
+  pvpGameMode.value = mode
+  if (mode === '4P') allowDonden.value = false
+  syncMyMeta()
+}
+
+const setAllowDonden = (val: boolean) => {
+  allowDonden.value = val
+  syncMyMeta()
+}
+
+const joinCustomRoom = () => {
+  const code = joinRoomInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '')
+  if (!code) {
+    showToast('⚠️ 请输入有效的房间号')
+    return
+  }
+  roomId.value = code
+  window.history.replaceState({}, '', `/?room=${code}`)
+  pvp.joinRoom(code)
+  showToast(`🌐 已跨公网加入房间 #${code}，正在同步座位...`)
+}
+
 const syncMyMeta = () => {
-  pvp.updateMyMeta(mySelectedGirl.value, betAmount.value)
+  pvp.updateMyMeta(mySelectedGirl.value, betAmount.value, pvpGameMode.value, allowDonden.value)
 }
 
 const startPvpImmediately = () => {
@@ -825,6 +1012,14 @@ const addPlayerCredit = () => {
 const switchGirl = (idx: number) => {
   unlockAudio()
   if (!game || !general) return
+  if (game.isPvpMode) {
+    // In PVP mode: switching girl changes your own representative avatar & broadcasts it!
+    mySelectedGirl.value = idx
+    syncMyMeta()
+    general.PlaySound(SoundId.SND_DING)
+    showToast(`👩 已更新您的联机代表角色为：${girlShortNames[idx]}`)
+    return
+  }
   if (game.m_iCurGirl === -1) {
     general.pushKey(String.fromCharCode(97 + idx))
   } else {
@@ -914,17 +1109,32 @@ onMounted(async () => {
     }
   }
 
+  pvp.onPublicStatusChange = (connected, text) => {
+    publicConnected.value = connected
+    publicStatusText.value = text
+  }
+
+  pvp.onRoomRuleChange = (gMode, dondenAllowed, bet) => {
+    pvpGameMode.value = gMode
+    allowDonden.value = dondenAllowed
+    betAmount.value = bet
+  }
+
   pvp.onStartPvpMatch = (payload) => {
     showInviteModal.value = false
     showPvpHandoverBanner.value = false
+    pvpGameMode.value = payload.gameMode || '2P'
+    allowDonden.value = Boolean(payload.allowDonden)
+    betAmount.value = payload.betAmount || 20
     if (game) {
       game.startPvpMatchNow(payload)
-      showToast(`🔥 1v1 真人对战开始！对手: 【${game.pvpOpponentName}】 (押注 ${payload.betAmount} 筹码)`)
+      const modeName = payload.gameMode === '4P' ? '🀄 四人麻将环桌局' : '⚔️ 1v1 真人死斗局'
+      showToast(`🔥 ${modeName}开始！(押注 ${payload.betAmount} 筹码/番)`)
     }
   }
 
   pvp.onOpponentDonden = () => {
-    if (game && game.isPvpMode) {
+    if (game && game.isPvpMode && game.allowDonden && game.pvpGameMode === '2P') {
       game.DonDen()
       showToast('⚡ 对手发动了 DONDEN 乾坤换牌！')
     }
@@ -1831,5 +2041,191 @@ onUnmounted(() => {
 .modal-btn.start-pvp:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 4P Standings & Public Lobby Styles */
+.seat-standings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.seat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.seat-row.active {
+  border-color: #eab308;
+  box-shadow: 0 0 10px rgba(234, 179, 8, 0.35);
+}
+.seat-row.me {
+  background: rgba(16, 185, 129, 0.12);
+}
+.wind-badge {
+  width: 22px;
+  height: 22px;
+  background: #1e293b;
+  border: 1px solid #f59e0b;
+  color: #fde047;
+  font-weight: 900;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.seat-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.seat-name-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 800;
+}
+.s-tag {
+  font-size: 10px;
+  color: #4ade80;
+}
+.s-tag.bot {
+  color: #38bdf8;
+}
+.seat-score-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #cbd5e1;
+}
+.s-chips {
+  color: #fbbf24;
+  font-weight: 700;
+}
+.fair-lock-notice {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(6, 78, 59, 0.45);
+  border: 1px solid #10b981;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #a7f3d0;
+  line-height: 1.4;
+}
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pub-pill {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #1e293b;
+  color: #94a3b8;
+  border: 1px solid #475569;
+}
+.pub-pill.ok {
+  background: #064e3b;
+  color: #6ee7b7;
+  border-color: #10b981;
+}
+.join-code-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.room-code-input {
+  width: 140px;
+  background: #020617;
+  border: 1px solid #38bdf8;
+  border-radius: 5px;
+  padding: 4px 8px;
+  color: #fde047;
+  font-weight: 800;
+  font-size: 12px;
+}
+.mini-join-btn {
+  background: #0284c7;
+  color: #fff;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.mode-switch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.rule-card-btn {
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 7px 9px;
+  text-align: left;
+  color: #e2e8f0;
+  cursor: pointer;
+}
+.rule-card-btn.selected {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+}
+.rc-title {
+  font-size: 12px;
+  font-weight: 900;
+  color: #fde047;
+}
+.rc-desc {
+  font-size: 10.5px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+.rule-toggle-row {
+  display: flex;
+  gap: 6px;
+}
+.fair-btn {
+  flex: 1;
+  background: #020617;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  padding: 5px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.fair-btn.selected {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.2);
+  color: #6ee7b7;
+}
+.fair-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.wind-pill {
+  background: #1e293b;
+  border: 1px solid #f59e0b;
+  color: #fde047;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.bot-slot {
+  color: #94a3b8;
+  font-weight: 600;
 }
 </style>
