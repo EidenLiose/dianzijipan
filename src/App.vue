@@ -449,9 +449,9 @@
                   class="room-code-input"
                 />
                 <button class="mini-join-btn" @click="joinCustomRoom">🌐 立即跨网加入该房</button>
-                <span v-if="lanInviteUrl" class="lan-inline">
-                  | 📱 局域网地址: <code>{{ lanInviteUrl }}</code>
-                  <button class="mini-copy-btn" @click="copyLanLink">复制</button>
+                <span class="lan-inline">
+                  | 🌍 公网域名直连: <code>{{ publicDomainUrl }}</code>
+                  <button class="mini-copy-btn" @click="copyPublicDomainLink">复制公网链接</button>
                 </span>
               </div>
             </div>
@@ -672,7 +672,13 @@ const validActions = reactive({
 })
 
 const roomPeersCount = computed(() => roomPeers.value.length)
-const inviteUrl = computed(() => `${window.location.origin}/?room=${roomId.value || '884821'}`)
+const inviteUrl = computed(() => {
+  const origin = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? window.location.origin
+    : `https://mj.eduready.ai`
+  return `${origin}/?room=${roomId.value || '884821'}`
+})
+const publicDomainUrl = computed(() => `https://mj.eduready.ai/?room=${roomId.value || '884821'}`)
 const lanInviteUrl = computed(() => {
   if (lanIps.value.length === 0) return ''
   return `http://${lanIps.value[0]}:3000/?room=${roomId.value || '884821'}`
@@ -876,6 +882,11 @@ const copyLanLink = () => {
   if (!lanInviteUrl.value) return
   navigator.clipboard?.writeText(lanInviteUrl.value)
   showToast('📱 局域网直连链接已复制！')
+}
+
+const copyPublicDomainLink = () => {
+  navigator.clipboard?.writeText(publicDomainUrl.value)
+  showToast('🌍 公网域名对战链接 (https://mj.eduready.ai) 已复制！')
 }
 
 const openSecondTabForTest = () => {

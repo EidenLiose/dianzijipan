@@ -3,12 +3,23 @@
 基于开源项目 [`weimzh/mahjong`](https://github.com/weimzh/mahjong) 完整 C++ 引擎（`CGame` / `CPlayer` / `CBot` / `CTitle` / `CSound` / `CMusic`）与原版街机位图、音效、音乐、字体资源进行 **1:1 像素级（640×480）HTML5 Canvas 移植**，并在此基础上完整迭代了 **触控与防误触手势体系、免服务器公网跨网联机、四人环桌麻将模式（支持 1~4 真人 + AI 自动补位）、联网防作弊规则管控、以及 WebRTC P2P 实时语音对讲与智能音频闪避系统**。
 
 - **GitHub 仓库**：[`https://github.com/EidenLiose/dianzijipan`](https://github.com/EidenLiose/dianzijipan)
+- **公网专属域名**：[`https://mj.eduready.ai`](https://mj.eduready.ai)（服务器：`173.231.53.226`）
 
 ---
 
 ## 📋 版本迭代记录 (Version Changelog)
 
-### 🚀 `v3.0.0` — 公网跨网直连、四人麻将模式 (4P) & 联网防作弊管控版 *(最新)*
+### 🌍 `v3.1.0` — 专属公网域名 (`mj.eduready.ai`) 生产级一体化联机服务端 *(最新)*
+1. **🖥️ 零依赖 Node.js 生产级一体化服务端（[`server.mjs`](./server.mjs)）**：
+   - 同时承载 `./dist` 静态前端/原版音画资源高速分发，以及同域下的 **`/api/room/events`（SSE 实时流）** 与 **`/api/room/send`（房间状态/出牌/语音信令广播）**。
+   - 内置 15 秒 SSE 心跳保活（`: heartbeat`）与 `X-Accel-Buffering: no` 响应头，完美穿透 Nginx / Cloudflare 反向代理，不掉线、不缓冲。
+2. **🔒 Nginx + HTTPS 反向代理与一键部署脚本**：
+   - 新增 [`nginx-mj.eduready.ai.conf`](./nginx-mj.eduready.ai.conf) 配置文件与 [`deploy-server.sh`](./deploy-server.sh) PM2 守护进程一键部署脚本，支持 `https://mj.eduready.ai` 开启 SSL 以解锁公网移动端/PC端 WebRTC 实时麦克风语音。
+   - 邀请弹窗内置 **`🌍 公网域名直连: https://mj.eduready.ai/?room=XXXXXX`** 一键复制按钮。
+
+---
+
+### 🚀 `v3.0.0` — 公网跨网直连、四人麻将模式 (4P) & 联网防作弊管控版
 1. **🌐 免服公网跨网联机（Public WSS + 局域网 SSE + 本地三通道容灾）**：
    - 在 [`src/weimzh/pvpManager.ts`](./src/weimzh/pvpManager.ts) 中内置零配置 **MQTT v3.1.1 over WSS 公网加密信令客户端 (`PublicWssSignaling`)**，自动连接高可用公网集群（`wss://broker.emqx.io:8084/mqtt` / `wss://broker.hivemq.com:8884/mqtt`）。
    - 支持异地宽带、手机 4G/5G 流量或纯静态部署（如 GitHub Pages / Vercel）下，通过 **点击邀请链接** 或 **直接输入 6 位房间号** 秒级跨公网入房。

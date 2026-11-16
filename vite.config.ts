@@ -158,5 +158,6 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 3000,
+    allowedHosts: ['mj.eduready.ai', '173.231.53.226', true],
   },
 })
