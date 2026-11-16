@@ -4,6 +4,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -248,11 +249,30 @@ const server = http.createServer((req, res) => {
     const contentType = MIME_TYPES[ext] || 'application/octet-stream'
     const cacheControl =
       ext === '.html' ? 'no-cache' : 'public, max-age=86400'
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Cache-Control': cacheControl,
-    })
-    res.end(content)
+    const acceptEncoding = req.headers['accept-encoding'] || ''
+    const compressible = ['.html', '.js', '.mjs', '.css', '.json', '.ttf', '.svg', '.txt', '.ini'].includes(ext)
+
+    if (compressible && acceptEncoding.includes('gzip') && content.length > 1024) {
+      zlib.gzip(content, (gzErr, gzData) => {
+        if (gzErr) {
+          res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl })
+          res.end(content)
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Encoding': 'gzip',
+          'Cache-Control': cacheControl,
+        })
+        res.end(gzData)
+      })
+    } else {
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Cache-Control': cacheControl,
+      })
+      res.end(content)
+    }
   })
 })
 

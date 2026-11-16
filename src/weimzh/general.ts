@@ -99,43 +99,122 @@ export class CGeneral {
   }
 
   async initAssets(): Promise<void> {
-    // Load fonts into document.fonts
-    try {
-      const fontKai = new FontFace('WeimzhKai', 'url(/weimzh/fonts/gkai00mp.ttf)')
-      const fontBrush = new FontFace('WeimzhBrush', 'url(/weimzh/fonts/brush.ttf)')
-      const [loadedKai, loadedBrush] = await Promise.all([fontKai.load(), fontBrush.load()])
-      ;(document.fonts as any).add(loadedKai)
-      ;(document.fonts as any).add(loadedBrush)
-    } catch (e) {
-      console.warn('Font load fallback:', e)
+    // Draw immediate boot loading screen on Canvas so screen is never blank black
+    const drawBootProgress = (loaded: number, total: number, label: string) => {
+      const ctx = this.ctx
+      ctx.fillStyle = '#070b14'
+      ctx.fillRect(0, 0, 640, 480)
+      ctx.strokeStyle = '#eab308'
+      ctx.lineWidth = 3
+      ctx.strokeRect(18, 18, 604, 444)
+
+      ctx.fillStyle = '#fde047'
+      ctx.font = 'bold 28px "Microsoft YaHei", sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('麻雀電子基盤 · ELECTRON BASE', 320, 185)
+
+      ctx.fillStyle = '#38bdf8'
+      ctx.font = '15px "Microsoft YaHei", sans-serif'
+      ctx.fillText(`正在载入街机资源 (${loaded}/${total}): ${label}`, 320, 230)
+
+      const barW = 360
+      const barH = 18
+      const barX = (640 - barW) / 2
+      const barY = 260
+      ctx.fillStyle = '#1e293b'
+      ctx.fillRect(barX, barY, barW, barH)
+      ctx.strokeStyle = '#38bdf8'
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(barX, barY, barW, barH)
+
+      const pct = total > 0 ? Math.min(1, loaded / total) : 0
+      const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0)
+      grad.addColorStop(0, '#10b981')
+      grad.addColorStop(1, '#38bdf8')
+      ctx.fillStyle = grad
+      ctx.fillRect(barX + 2, barY + 2, (barW - 4) * pct, barH - 4)
+
+      ctx.fillStyle = '#94a3b8'
+      ctx.font = '12px "Microsoft YaHei", sans-serif'
+      ctx.fillText(`${Math.round(pct * 100)}%`, 320, 302)
+      ctx.textAlign = 'left'
     }
 
-    const loadImg = (src: string): Promise<HTMLImageElement> =>
-      new Promise((resolve, reject) => {
+    // Load fonts asynchronously in background (NEVER block game startup on 2.5MB TTF)
+    ;(async () => {
+      try {
+        const fontKai = new FontFace('WeimzhKai', 'url(/weimzh/fonts/gkai00mp.ttf)')
+        const fontBrush = new FontFace('WeimzhBrush', 'url(/weimzh/fonts/brush.ttf)')
+        const [loadedKai, loadedBrush] = await Promise.all([fontKai.load(), fontBrush.load()])
+        ;(document.fonts as any).add(loadedKai)
+        ;(document.fonts as any).add(loadedBrush)
+      } catch (e) {
+        console.warn('Font load fallback:', e)
+      }
+    })()
+
+    let loadedCount = 0
+    const totalCount = 22
+    drawBootProgress(0, totalCount, '准备并发加载...')
+
+    const loadImg = (src: string, label: string): Promise<HTMLImageElement> =>
+      new Promise((resolve) => {
         const img = new Image()
-        img.onload = () => resolve(img)
-        img.onerror = reject
+        const timer = setTimeout(() => {
+          console.warn('Image load timeout:', src)
+          loadedCount++
+          drawBootProgress(loadedCount, totalCount, label)
+          resolve(img)
+        }, 12000)
+        img.onload = () => {
+          clearTimeout(timer)
+          loadedCount++
+          drawBootProgress(loadedCount, totalCount, label)
+          resolve(img)
+        }
+        img.onerror = () => {
+          clearTimeout(timer)
+          console.warn('Image load error:', src)
+          loadedCount++
+          drawBootProgress(loadedCount, totalCount, label)
+          resolve(img)
+        }
         img.src = src
       })
 
+    // Parallel load all 22 images simultaneously (10x faster than sequential await)
+    const tasks: Promise<void>[] = []
     for (let i = 0; i < 4; i++) {
       const idx = i + 1
-      this.m_imgGirls[i][GIRL_GRAYSTYLE] = await loadImg(`/weimzh/images/mjgirl${idx}a.png`)
-      this.m_imgGirls[i][GIRL_COLOR] = await loadImg(`/weimzh/images/mjgirl${idx}b.jpg`)
-      this.m_imgGirls[i][GIRL_FULL] = await loadImg(`/weimzh/images/mjgirl${idx}c.jpg`)
+      tasks.push(
+        loadImg(`/weimzh/images/mjgirl${idx}a.png`, `角色立绘 ${idx}A`).then((img) => {
+          this.m_imgGirls[i][GIRL_GRAYSTYLE] = img
+        })
+      )
+      tasks.push(
+        loadImg(`/weimzh/images/mjgirl${idx}b.jpg`, `角色立绘 ${idx}B`).then((img) => {
+          this.m_imgGirls[i][GIRL_COLOR] = img
+        })
+      )
+      tasks.push(
+        loadImg(`/weimzh/images/mjgirl${idx}c.jpg`, `角色立绘 ${idx}C`).then((img) => {
+          this.m_imgGirls[i][GIRL_FULL] = img
+        })
+      )
     }
 
-    this.m_imgElectron = await loadImg('/weimzh/images/electron.jpg')
-    this.m_imgGameOver = await loadImg('/weimzh/images/gameover.jpg')
-    this.m_imgTiles = await loadImg('/weimzh/images/tiles.jpg')
-    this.m_imgBonusGame = await loadImg('/weimzh/images/bgame.jpg')
-    this.m_imgBonusGameGray = await loadImg('/weimzh/images/bgame_gray.png')
+    tasks.push(loadImg('/weimzh/images/electron.jpg', '电子基盘桌面').then((img) => { this.m_imgElectron = img }))
+    tasks.push(loadImg('/weimzh/images/gameover.jpg', '结算背景').then((img) => { this.m_imgGameOver = img }))
+    tasks.push(loadImg('/weimzh/images/tiles.jpg', '麻将牌图集').then((img) => { this.m_imgTiles = img }))
+    tasks.push(loadImg('/weimzh/images/bgame.jpg', '奖励时钟图').then((img) => { this.m_imgBonusGame = img }))
+    tasks.push(loadImg('/weimzh/images/bgame_gray.png', '奖励时钟灰度图').then((img) => { this.m_imgBonusGameGray = img }))
+    tasks.push(loadImg('/weimzh/images/fire1.png', '立直火焰特效1').then((img) => { this.m_imgFire1 = img }))
+    tasks.push(loadImg('/weimzh/images/fire2.png', '立直火焰特效2').then((img) => { this.m_imgFire2 = img }))
+    tasks.push(loadImg('/weimzh/images/flash1.png', '胡牌闪电特效1').then((img) => { this.m_imgFlash1 = img }))
+    tasks.push(loadImg('/weimzh/images/flash2.png', '胡牌闪电特效2').then((img) => { this.m_imgFlash2 = img }))
+    tasks.push(loadImg('/weimzh/images/hand.png', '街机手部光标').then((img) => { this.m_imgHand = img }))
 
-    this.m_imgFire1 = await loadImg('/weimzh/images/fire1.png')
-    this.m_imgFire2 = await loadImg('/weimzh/images/fire2.png')
-    this.m_imgFlash1 = await loadImg('/weimzh/images/flash1.png')
-    this.m_imgFlash2 = await loadImg('/weimzh/images/flash2.png')
-    this.m_imgHand = await loadImg('/weimzh/images/hand.png')
+    await Promise.all(tasks)
 
     const musFiles = [
       '/weimzh/music/music.ogg',
