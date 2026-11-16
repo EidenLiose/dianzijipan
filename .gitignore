@@ -1,0 +1,14 @@
+﻿node_modules/
+dist/
+*.zip
+weimzh_*.png
+weimzh_*.jpg
+screen*.png
+composite_*.png
+test_*.png
+im3_*.png
+hand*.png
+left_score.png
+apply_update*.py
+generate_audio.py
+.DS_Store
