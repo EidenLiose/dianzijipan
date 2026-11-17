@@ -189,13 +189,13 @@
             {{ isRecordingVoice ? '🔴 正在录制真人语音 (3秒)...' : '🎤 点击发送 3 秒真人麦克风语音' }}
           </button>
 
-          <div class="quick-voice-title">💬 快捷语音喊话 (带音效与语音播报):</div>
+          <div class="quick-voice-title">💬 腾讯棋牌经典快捷语音 (台湾甜美女声):</div>
           <div class="emote-grid">
             <button
               v-for="(txt, idx) in quickVoiceLines"
               :key="idx"
               class="emote-btn"
-              @click.stop="sendQuickVoice(txt)"
+              @click.stop="sendQuickVoice(txt, idx)"
             >
               🔊 {{ txt }}
             </button>
@@ -775,10 +775,14 @@ const girlNames = [
 const girlShortNames = ['美纪 (Miki)', '留美 (Rumi)', '结衣 (Yui)', '雅子 (Masako)']
 
 const quickVoiceLines = [
-  '快点出牌呀，花儿都谢了！',
-  '立直！这把大牌跑不了！',
-  '承让承让，清一色跳满！',
-  '手气太旺，再来决战一局！',
+  '快点吧，我等的花儿都谢了！',
+  '不要走，决战到天亮！',
+  '你是MM还是GG？',
+  '和你合作真是太愉快了！',
+  '你的牌打得也太好了吧！',
+  '怎么又断线了，网络怎么这么差呀！',
+  '下次再玩吧，我要走了。',
+  '再见了，我会想念大家的。',
 ]
 
 const tileLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']
@@ -891,7 +895,7 @@ const sendRealVoiceClip = async () => {
     showToast('✅ 真人语音已发送给全房牌友！')
   } else {
     showToast('⚠️ 未检测到麦克风权限，已为您发送快捷语音提示')
-    pvp.sendVoiceEmote('快点出牌呀，花儿都谢了！')
+    pvp.sendVoiceEmote(quickVoiceLines[0], 0)
   }
 }
 
@@ -1155,9 +1159,10 @@ const handleAiTakeover = () => {
   showToast('🤖 已由电脑 AI 自动托管接管牌局！')
 }
 
-const sendQuickVoice = (text: string) => {
+const sendQuickVoice = (text: string, idx?: number) => {
+  unlockAudio()
   ensureRoomJoined()
-  pvp.sendVoiceEmote(text)
+  pvp.sendVoiceEmote(text, idx)
 }
 
 const toggleMusic = () => {
@@ -1319,7 +1324,7 @@ onMounted(async () => {
   pvp.onPeerDisconnected = () => {
     isRoomConnected.value = false
     if (isPvpMode.value) {
-      disconnectCountdown.value = 30
+      disconnectCountdown.value = 60
       if (disconnectTimer) clearInterval(disconnectTimer)
       disconnectTimer = setInterval(() => {
         if (disconnectCountdown.value > 1) {

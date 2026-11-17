@@ -8,6 +8,7 @@ interface RoomPeer {
   girl: number
   bet: number
   res: any
+  leaveTimer?: any
 }
 
 function pvpRoomServerPlugin(): Plugin {
@@ -81,6 +82,11 @@ function pvpRoomServerPlugin(): Plugin {
             rooms.set(roomId, new Map())
           }
           const rm = rooms.get(roomId)!
+          const existingPeer = rm.get(peerId)
+          if (existingPeer?.leaveTimer) {
+            clearTimeout(existingPeer.leaveTimer)
+            existingPeer.leaveTimer = undefined
+          }
           rm.set(peerId, { peerId, name, girl, bet, res })
 
           // Notify all peers in room of updated roster
@@ -89,22 +95,32 @@ function pvpRoomServerPlugin(): Plugin {
             type: 'ROOM_ROSTER',
             roomId,
             peers,
-            joinedPeerId: peerId,
+            joinedPeerId: existingPeer ? undefined : peerId,
           })
 
           req.on('close', () => {
             const currentRm = rooms.get(roomId)
             if (currentRm) {
-              currentRm.delete(peerId)
-              if (currentRm.size === 0) {
-                rooms.delete(roomId)
-              } else {
-                broadcastToRoom(roomId, {
-                  type: 'PEER_LEFT',
-                  roomId,
-                  leftPeerId: peerId,
-                  peers: getPeerSummaries(roomId),
-                })
+              const curP = currentRm.get(peerId)
+              if (curP && curP.res === res) {
+                curP.leaveTimer = setTimeout(() => {
+                  const rmNow = rooms.get(roomId)
+                  if (!rmNow) return
+                  const pNow = rmNow.get(peerId)
+                  if (pNow && pNow.res === res) {
+                    rmNow.delete(peerId)
+                    if (rmNow.size === 0) {
+                      rooms.delete(roomId)
+                    } else {
+                      broadcastToRoom(roomId, {
+                        type: 'PEER_LEFT',
+                        roomId,
+                        leftPeerId: peerId,
+                        peers: getPeerSummaries(roomId),
+                      })
+                    }
+                  }
+                }, 8000)
               }
             }
           })

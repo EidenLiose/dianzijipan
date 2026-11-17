@@ -31,10 +31,12 @@ export interface StartMatchPayload {
 }
 
 export interface PvpMovePacket {
+  round?: number
   seatIndex?: number
   phase: 'DRAW' | 'DISCARD' | 'DONDEN' | 'CLAIM' | 'TIMEOUT'
   act: number
   index?: number
+  tileCode?: string
   chowLocation?: number
 }
 
@@ -545,25 +547,23 @@ export class PvpManager {
           })
         }
         this.updateRoleFromPeers()
-        if (isNew || data.type === 'BC_HELLO') {
-          if (this.onRosterUpdate) {
-            this.onRosterUpdate(this.peers, isNew ? p?.peerId : undefined)
-          }
-          if (data.type === 'BC_HELLO') {
-            this.sendMessage({
-              type: 'BC_HELLO_ACK',
-              peer: {
-                peerId: this.peerId,
-                name: this.myName,
-                girl: this.myGirl,
-                bet: this.betAmount,
-              },
-              gameMode: this.gameMode,
-              allowDonden: this.allowDonden,
-            })
-            if (p && p.peerId !== this.peerId && this.peerId < p.peerId) {
-              this.startWebRTCOffer(p.peerId)
-            }
+        if (this.onRosterUpdate) {
+          this.onRosterUpdate(this.peers, isNew ? p?.peerId : undefined)
+        }
+        if (data.type === 'BC_HELLO') {
+          this.sendMessage({
+            type: 'BC_HELLO_ACK',
+            peer: {
+              peerId: this.peerId,
+              name: this.myName,
+              girl: this.myGirl,
+              bet: this.betAmount,
+            },
+            gameMode: this.gameMode,
+            allowDonden: this.allowDonden,
+          })
+          if (p && p.peerId !== this.peerId && this.peerId < p.peerId) {
+            this.startWebRTCOffer(p.peerId)
           }
         }
         break
@@ -666,7 +666,7 @@ export class PvpManager {
           this.onChatEmote(data.senderName || '雀友', data.text)
         }
         this.playVoiceAlertTone()
-        this.speakText(data.text)
+        this.speakText(data.text, data.tauntIdx)
         break
       }
 
@@ -833,10 +833,14 @@ export class PvpManager {
     } catch {}
   }
 
-  waitForOpponentMove(timeoutMs: number = 18000): Promise<PvpMovePacket> {
-    if (this.moveQueue.length > 0) {
+  waitForOpponentMove(timeoutMs: number = 45000, expectedRound?: number): Promise<PvpMovePacket> {
+    while (this.moveQueue.length > 0) {
+      const next = this.moveQueue.shift()!
+      if (expectedRound !== undefined && next.round !== undefined && next.round !== expectedRound) {
+        continue // Skip stale packet from an earlier round
+      }
       this.onTurnCountdown?.(0, false)
-      return Promise.resolve(this.moveQueue.shift()!)
+      return Promise.resolve(next)
     }
     return new Promise((resolve) => {
       let secLeft = Math.ceil(timeoutMs / 1000)
@@ -857,6 +861,11 @@ export class PvpManager {
       }, timeoutMs)
 
       wrappedResolve = (move: PvpMovePacket) => {
+        if (expectedRound !== undefined && move.round !== undefined && move.round !== expectedRound) {
+          // Re-register resolver and ignore stale round packet
+          this.moveResolvers.unshift(wrappedResolve)
+          return
+        }
         clearTimeout(timeoutId)
         clearInterval(tickTimer)
         this.onTurnCountdown?.(0, false)
@@ -872,18 +881,19 @@ export class PvpManager {
     this.onTurnCountdown?.(0, false)
   }
 
-  sendVoiceEmote(text: string): void {
+  sendVoiceEmote(text: string, tauntIdx?: number): void {
     this.unlockVoiceAudio()
     this.sendMessage({
       type: 'CHAT_EMOTE',
       senderName: this.myName,
       text,
+      tauntIdx,
     })
     if (this.onChatEmote) {
       this.onChatEmote(this.myName, text)
     }
     this.playVoiceAlertTone()
-    this.speakText(text)
+    this.speakText(text, tauntIdx)
   }
 
   private playVoiceAlertTone(): void {
@@ -915,14 +925,29 @@ export class PvpManager {
     } catch {}
   }
 
-  private speakText(text: string): void {
+  private speakText(text: string, tauntIdx?: number): void {
     if (!this.speakerEnabled) return
     this.remoteSpeaking = true
     this.onSpeakingChange?.(this.localSpeaking, true)
     const resetSpeak = setTimeout(() => {
       this.remoteSpeaking = false
       this.onSpeakingChange?.(this.localSpeaking, false)
-    }, 2600)
+    }, 2800)
+
+    // Prefer real pre-generated Taiwanese female MP3 voice file for Tencent quick voice lines!
+    if (tauntIdx !== undefined && tauntIdx >= 0 && tauntIdx <= 7) {
+      try {
+        const audio = new Audio(`/weimzh/voice/taunts/taunt_${tauntIdx}.mp3`)
+        audio.volume = 1.0
+        audio.onended = () => {
+          clearTimeout(resetSpeak)
+          this.remoteSpeaking = false
+          this.onSpeakingChange?.(this.localSpeaking, false)
+        }
+        audio.play().catch(() => {})
+        return
+      } catch {}
+    }
 
     try {
       if ('speechSynthesis' in window) {

@@ -157,7 +157,12 @@ const server = http.createServer((req, res) => {
     })
 
     const rm = getOrCreateRoom(roomId)
-    rm.peers.set(peerId, { peerId, name, girl, bet, res })
+    const oldPeer = rm.peers.get(peerId)
+    if (oldPeer && oldPeer.leaveTimer) {
+      clearTimeout(oldPeer.leaveTimer)
+    }
+    const peerRecord = { peerId, name, girl, bet, res, leaveTimer: null }
+    rm.peers.set(peerId, peerRecord)
 
     const peers = getPeerSummaries(roomId)
     // Send initial roster to the newly connected peer immediately
@@ -167,7 +172,7 @@ const server = http.createServer((req, res) => {
           type: 'ROOM_ROSTER',
           roomId,
           peers,
-          joinedPeerId: peerId,
+          joinedPeerId: oldPeer ? undefined : peerId,
         })}\n\n`
       )
       // If a match is already active in this room, push ROOM_SYNC to restore reconnecting player!
@@ -190,32 +195,41 @@ const server = http.createServer((req, res) => {
         type: 'ROOM_ROSTER',
         roomId,
         peers,
-        joinedPeerId: peerId,
+        joinedPeerId: oldPeer ? undefined : peerId,
       },
       peerId
     )
 
     req.on('close', () => {
       const currentRm = rooms.get(roomId)
-      if (currentRm) {
-        currentRm.peers.delete(peerId)
-        if (currentRm.peers.size === 0) {
-          // Keep activeMatch & moves for 120s so refreshing players can seamlessly rejoin!
-          currentRm.cleanupTimer = setTimeout(() => {
-            const checkRm = rooms.get(roomId)
-            if (checkRm && checkRm.peers.size === 0) {
-              rooms.delete(roomId)
-            }
-          }, 120000)
-        } else {
-          broadcastToRoom(roomId, {
-            type: 'PEER_LEFT',
-            roomId,
-            leftPeerId: peerId,
-            peers: getPeerSummaries(roomId),
-          })
+      if (!currentRm) return
+      const curP = currentRm.peers.get(peerId)
+      if (!curP || curP.res !== res) return
+
+      // Wait 8s grace period before declaring PEER_LEFT (prevents false disconnects on SSE auto-reconnect!)
+      curP.leaveTimer = setTimeout(() => {
+        const checkRm = rooms.get(roomId)
+        if (!checkRm) return
+        const checkP = checkRm.peers.get(peerId)
+        if (checkP && checkP.res === res) {
+          checkRm.peers.delete(peerId)
+          if (checkRm.peers.size === 0) {
+            checkRm.cleanupTimer = setTimeout(() => {
+              const finalRm = rooms.get(roomId)
+              if (finalRm && finalRm.peers.size === 0) {
+                rooms.delete(roomId)
+              }
+            }, 120000)
+          } else {
+            broadcastToRoom(roomId, {
+              type: 'PEER_LEFT',
+              roomId,
+              leftPeerId: peerId,
+              peers: getPeerSummaries(roomId),
+            })
+          }
         }
-      }
+      }, 8000)
     })
     return
   }
