@@ -22,6 +22,7 @@ function getOrCreateRoom(roomId) {
       peers: new Map(),
       activeMatch: null,
       moves: [],
+      recentEvents: [],
       cleanupTimer: null,
     })
   }
@@ -49,9 +50,21 @@ function getLanIps() {
 function broadcastToRoom(roomId, msg, excludePeerId) {
   const rm = rooms.get(roomId)
   if (!rm) return
+  if (
+    msg &&
+    msg.msgId &&
+    ['START_PVP_MATCH', 'PVP_MOVE', 'CHAT_EMOTE', 'VOICE_AUDIO_CHUNK', 'UPDATE_META', 'BC_HELLO', 'BC_HELLO_ACK'].includes(
+      msg.type
+    )
+  ) {
+    rm.recentEvents.push(msg)
+    if (rm.recentEvents.length > 80) {
+      rm.recentEvents.splice(0, rm.recentEvents.length - 80)
+    }
+  }
   const payload = `data: ${JSON.stringify(msg)}\n\n`
   for (const [pid, peer] of rm.peers.entries()) {
-    if (pid !== excludePeerId) {
+    if (pid !== excludePeerId && peer.res) {
       try {
         peer.res.write(payload)
       } catch {}
@@ -175,8 +188,8 @@ const server = http.createServer((req, res) => {
           joinedPeerId: oldPeer ? undefined : peerId,
         })}\n\n`
       )
-      // If a match is already active in this room, push ROOM_SYNC to restore reconnecting player!
-      if (rm.activeMatch) {
+      // If a match is already active in this room and this is a fresh join/page refresh, push ROOM_SYNC
+      if (rm.activeMatch && !oldPeer) {
         res.write(
           `data: ${JSON.stringify({
             type: 'ROOM_SYNC',
@@ -185,6 +198,14 @@ const server = http.createServer((req, res) => {
             moves: rm.moves,
           })}\n\n`
         )
+      }
+      // Also flush recent events on SSE reconnect so no move sent during reconnect window is missed
+      if (oldPeer && rm.recentEvents.length > 0) {
+        for (const ev of rm.recentEvents.slice(-20)) {
+          if (ev.senderId !== peerId) {
+            res.write(`data: ${JSON.stringify(ev)}\n\n`)
+          }
+        }
       }
     } catch {}
 
@@ -246,10 +267,35 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body)
         const roomId = data.roomId || '884821'
         const senderId = data.senderId
-        const rm = rooms.get(roomId)
+        const rm = getOrCreateRoom(roomId)
+
+        // Keep sender alive in room roster even if Cloudflare temporarily resets their SSE stream
+        if ((data.type === 'BC_HEARTBEAT' || data.type === 'BC_HELLO') && data.peer && senderId) {
+          const existingP = rm.peers.get(senderId)
+          if (existingP) {
+            if (existingP.leaveTimer) {
+              clearTimeout(existingP.leaveTimer)
+              existingP.leaveTimer = null
+            }
+            existingP.name = data.peer.name || existingP.name
+            existingP.girl = data.peer.girl ?? existingP.girl
+            existingP.bet = data.peer.bet ?? existingP.bet
+          } else {
+            rm.peers.set(senderId, {
+              peerId: senderId,
+              name: data.peer.name || '街机雀士',
+              girl: data.peer.girl ?? 0,
+              bet: data.peer.bet ?? 20,
+              res: null,
+              leaveTimer: null,
+            })
+          }
+        }
+
         if (data.type === 'START_PVP_MATCH' && data.payload && rm) {
           rm.activeMatch = data.payload
           rm.moves = []
+          rm.recentEvents = []
         } else if (data.type === 'PVP_MOVE' && data.move && rm) {
           rm.moves.push(data.move)
         }
@@ -269,7 +315,12 @@ const server = http.createServer((req, res) => {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
         })
-        res.end(JSON.stringify({ ok: true }))
+        res.end(
+          JSON.stringify({
+            ok: true,
+            events: rm.recentEvents.filter((e) => e.senderId !== senderId).slice(-25),
+          })
+        )
       } catch {
         res.writeHead(400, {
           'Content-Type': 'application/json',

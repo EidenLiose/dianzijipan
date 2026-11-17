@@ -326,8 +326,10 @@ export class CGeneral {
     })
   }
 
-  async WaitForAnyKey(): Promise<void> {
-    await this.ReadKey()
+  async WaitForAnyKey(timeoutMs: number = 5000): Promise<void> {
+    this.hasActivePrompt = true
+    await this.ReadKeyWithTimeout(timeoutMs)
+    this.hasActivePrompt = false
   }
 
   UTIL_Delay(ms: number): Promise<void> {
@@ -729,7 +731,7 @@ export class CGeneral {
     await this.ScreenFade(400)
   }
 
-  async GameOver(): Promise<void> {
+  async GameOver(autoContinueMs?: number): Promise<void> {
     let iCurSel = 0
     this.ctx.drawImage(this.m_imgGameOver, 0, 0, 640, 480)
     this.DrawText('GAME OVER', 22, 22, 1, 255, 255, 0)
@@ -738,17 +740,29 @@ export class CGeneral {
     this.DrawUTF8Text(msg('No'), 450, 390, 1, 255, 255, 0)
     this.PlayMusic(this.m_musGameOver, false)
 
+    if (autoContinueMs && autoContinueMs > 0) {
+      this.ctx.drawImage(this.m_imgGameOver, 400, 350, 32, 80, 400, 350, 32, 80)
+      this.DrawText('>', 400, 350, 1, 255, 255, 0)
+      await this.UTIL_Delay(autoContinueMs)
+      this.PlayMusic(null)
+      this.PlaySound(SoundId.SND_SOUND1)
+      await this.ScreenFade(400)
+      return
+    }
+
+    this.hasActivePrompt = true
     while (true) {
       this.ctx.drawImage(this.m_imgGameOver, 400, 350, 32, 80, 400, 350, 32, 80)
       this.DrawText('>', 400, iCurSel ? 390 : 350, 1, 255, 255, 0)
 
-      const key = await this.ReadKey()
+      const key = await this.ReadKeyWithTimeout(8000)
       if (key === 'ArrowUp' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowRight') {
         iCurSel ^= 1
-      } else if (key.toLowerCase() === 'y' || key === 'Enter' || key === ' ') {
+      } else {
+        this.hasActivePrompt = false
         this.PlayMusic(null)
         this.PlaySound(SoundId.SND_SOUND1)
-        await this.UTIL_Delay(1200)
+        await this.UTIL_Delay(800)
         await this.ScreenFade(300)
         return
       }

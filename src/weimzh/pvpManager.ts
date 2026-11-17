@@ -391,19 +391,8 @@ export class PvpManager {
       }
     } catch {}
 
-    // 2. SSE connection to Vite built-in room server for LAN sync
-    try {
-      const url = `/api/room/events?room=${encodeURIComponent(roomId)}&peerId=${encodeURIComponent(
-        this.peerId
-      )}&name=${encodeURIComponent(this.myName)}&girl=${this.myGirl}&bet=${this.betAmount}`
-      this.es = new EventSource(url)
-      this.es.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data)
-          this.handleIncomingMessage(data)
-        } catch {}
-      }
-    } catch {}
+    // 2. SSE connection to Vite/Production built-in room server (with auto-reconnect on Cloudflare reset)
+    this.openSseStream(roomId)
 
     // 3. Public Internet MQTT over WSS Relay for cross-network / mobile 5G / GitHub Pages
     this.publicSignaling.connect(roomId)
@@ -414,10 +403,41 @@ export class PvpManager {
 
     if (this.presenceTimer) clearInterval(this.presenceTimer)
     this.presenceTimer = setInterval(() => {
+      if (this.roomId && (!this.es || this.es.readyState === EventSource.CLOSED)) {
+        this.openSseStream(this.roomId)
+      }
       this.announcePresence(true)
-    }, 6000)
+    }, 2800)
 
     this.initVoiceChat()
+  }
+
+  private openSseStream(roomId: string): void {
+    try {
+      if (this.es) {
+        this.es.close()
+        this.es = null
+      }
+      const url = `/api/room/events?room=${encodeURIComponent(roomId)}&peerId=${encodeURIComponent(
+        this.peerId
+      )}&name=${encodeURIComponent(this.myName)}&girl=${this.myGirl}&bet=${this.betAmount}`
+      this.es = new EventSource(url)
+      this.es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data)
+          this.handleIncomingMessage(data)
+        } catch {}
+      }
+      this.es.onerror = () => {
+        if (this.es && this.es.readyState === EventSource.CLOSED && this.roomId) {
+          setTimeout(() => {
+            if (this.roomId && (!this.es || this.es.readyState === EventSource.CLOSED)) {
+              this.openSseStream(this.roomId)
+            }
+          }, 1500)
+        }
+      }
+    } catch {}
   }
 
   private announcePresence(isHeartbeat: boolean = false): void {
@@ -480,13 +500,21 @@ export class PvpManager {
       this.publicSignaling.publish(fullMsg)
     } catch {}
 
-    // Channel 3: LAN Vite Server
+    // Channel 3: Server HTTP POST + Piggybacked Missed-Events Sync (100% immune to Cloudflare SSE drops!)
     try {
-      await fetch('/api/room/send', {
+      const resp = await fetch('/api/room/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fullMsg),
       })
+      if (resp.ok) {
+        const json = await resp.json().catch(() => null)
+        if (json && Array.isArray(json.events)) {
+          for (const ev of json.events) {
+            this.handleIncomingMessage(ev)
+          }
+        }
+      }
     } catch {}
   }
 
@@ -525,10 +553,14 @@ export class PvpManager {
         if (this.onRosterUpdate) {
           this.onRosterUpdate(this.peers, data.joinedPeerId)
         }
-        // Trigger WebRTC offer to all other peers in roster
+        // Trigger WebRTC offer only to peers that don't already have an active/connecting RTCPeerConnection
         for (const p of this.peers) {
           if (p.peerId !== this.peerId && (this.isHost || this.peerId < p.peerId)) {
-            this.startWebRTCOffer(p.peerId)
+            const existingPc = this.peerConnections.get(p.peerId)
+            const st = existingPc?.connectionState
+            if (!existingPc || st === 'failed' || st === 'closed' || st === 'disconnected') {
+              this.startWebRTCOffer(p.peerId)
+            }
           }
         }
         break
@@ -632,7 +664,6 @@ export class PvpManager {
 
       case 'ROOM_SYNC': {
         if (data.match) {
-          this.moveQueue = []
           this.gameMode = data.match.gameMode || '2P'
           this.allowDonden = Boolean(data.match.allowDonden)
           this.betAmount = data.match.betAmount || 20
@@ -834,11 +865,21 @@ export class PvpManager {
   }
 
   waitForOpponentMove(timeoutMs: number = 45000, expectedRound?: number): Promise<PvpMovePacket> {
-    while (this.moveQueue.length > 0) {
-      const next = this.moveQueue.shift()!
-      if (expectedRound !== undefined && next.round !== undefined && next.round !== expectedRound) {
-        continue // Skip stale packet from an earlier round
+    for (let i = 0; i < this.moveQueue.length; i++) {
+      const next = this.moveQueue[i]
+      if (expectedRound !== undefined && next.round !== undefined) {
+        if (next.round < expectedRound) {
+          // Discard stale packet from an earlier round
+          this.moveQueue.splice(i, 1)
+          i--
+          continue
+        }
+        if (next.round > expectedRound) {
+          // Preserve packet belonging to the next round!
+          continue
+        }
       }
+      this.moveQueue.splice(i, 1)
       this.onTurnCountdown?.(0, false)
       return Promise.resolve(next)
     }
@@ -861,10 +902,18 @@ export class PvpManager {
       }, timeoutMs)
 
       wrappedResolve = (move: PvpMovePacket) => {
-        if (expectedRound !== undefined && move.round !== undefined && move.round !== expectedRound) {
-          // Re-register resolver and ignore stale round packet
-          this.moveResolvers.unshift(wrappedResolve)
-          return
+        if (expectedRound !== undefined && move.round !== undefined) {
+          if (move.round < expectedRound) {
+            // Ignore stale packet from an earlier round and keep waiting
+            this.moveResolvers.unshift(wrappedResolve)
+            return
+          }
+          if (move.round > expectedRound) {
+            // Save future round packet in moveQueue and keep waiting for current round
+            this.moveQueue.push(move)
+            this.moveResolvers.unshift(wrappedResolve)
+            return
+          }
         }
         clearTimeout(timeoutId)
         clearInterval(tickTimer)

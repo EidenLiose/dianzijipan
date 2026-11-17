@@ -1539,7 +1539,16 @@ export class CPlayer extends CBasePlayer {
 
         case 'n':
         case 'N': {
-          if (this.IsRoundDraw()) return playeraction.PA_NONE
+          if (this.IsRoundDraw()) {
+            if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
+              this.gpGame.pvpManager.sendPvpMove({
+                round: this.gpGame.pvpRoundCounter,
+                phase: 'DRAW',
+                act: playeraction.PA_NONE,
+              })
+            }
+            return playeraction.PA_NONE
+          }
           for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
             this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
           }
@@ -1595,7 +1604,16 @@ export class CPlayer extends CBasePlayer {
         case ' ':
         case 'Enter':
           if (act === playeraction.PA_DRAW) {
-            if (this.IsRoundDraw()) return playeraction.PA_NONE
+            if (this.IsRoundDraw()) {
+              if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
+                this.gpGame.pvpManager.sendPvpMove({
+                  round: this.gpGame.pvpRoundCounter,
+                  phase: 'DRAW',
+                  act: playeraction.PA_NONE,
+                })
+              }
+              return playeraction.PA_NONE
+            }
             for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
               this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
             }
@@ -1907,8 +1925,9 @@ export class CPlayer extends CBasePlayer {
   private async ActionKong(): Promise<playeraction> {
     for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
       if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) continue
-      if (this.m_Hand.CanKong(this.m_Hand.m_Tiles[i].tile, false)) {
-        if (this.m_Hand.Kong(this.m_Hand.m_Tiles[i].tile, false)) {
+      const kTile = this.m_Hand.m_Tiles[i].tile.clone()
+      if (this.m_Hand.CanKong(kTile, false)) {
+        if (this.m_Hand.Kong(kTile, false)) {
           this.m_iState |= playerstate_flags.PS_KONGED
           if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
             this.gpGame.pvpManager.sendPvpMove({
@@ -1916,6 +1935,7 @@ export class CPlayer extends CBasePlayer {
               phase: 'DISCARD',
               act: playeraction.PA_KONG,
               index: i,
+              tileCode: kTile.GetCode(),
             })
           }
           return playeraction.PA_KONG
@@ -2035,6 +2055,9 @@ export class CBot extends CBasePlayer {
         this.gpGame.onAutoPlayTriggered?.('⚠️ 对手45秒超时未操作或已掉线，已自动由电脑 AI 托管接管继续牌局！')
         // Fall through immediately to AI Bot logic below!
       } else if (state === actionstate.AS_DRAW) {
+        if (move.act === playeraction.PA_NONE) {
+          return playeraction.PA_NONE
+        }
         if (move.act === playeraction.PA_DRAW) {
           if (this.IsRoundDraw()) return playeraction.PA_NONE
           for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
@@ -2043,6 +2066,7 @@ export class CBot extends CBasePlayer {
           if (move.tileCode) {
             const exact = new CTile(move.tileCode)
             if (CTile.FetchTile(exact)) {
+              RandomLong(0, 100) // Advance shared PRNG in lockstep with opponent's RandomTile()
               this.m_Hand.AddTile(exact, handtile_flags.HT_JUSTGOT)
             } else {
               this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
@@ -2085,21 +2109,47 @@ export class CBot extends CBasePlayer {
           return playeraction.PA_MAHJONG
         }
         if (move.act === playeraction.PA_KONG) {
-          const idx = move.index ?? 0
-          if (this.m_Hand.Kong(this.m_Hand.m_Tiles[idx].tile, false)) {
+          const idx = Math.min(this.m_Hand.m_iNumTiles - 1, Math.max(0, move.index ?? 0))
+          const kTile = move.tileCode ? new CTile(move.tileCode) : this.m_Hand.m_Tiles[idx]?.tile
+          if (kTile && this.m_Hand.Kong(kTile, false)) {
             this.m_iState |= playerstate_flags.PS_KONGED
-            this.gpGeneral.PlayActionVoice('kong')
-            return playeraction.PA_KONG
-          }
-        }
-        let idx = Math.min(this.m_Hand.m_iNumTiles - 1, Math.max(0, move.index ?? this.m_Hand.m_iNumTiles - 1))
-        if (move.tileCode && !this.m_Hand.m_Tiles[idx]?.tile.equals(move.tileCode)) {
-          for (let k = this.m_Hand.m_iNumTiles - 1; k >= 0; k--) {
-            if (this.m_Hand.m_Tiles[k].tile.equals(move.tileCode)) {
-              idx = k
-              break
+          } else {
+            // Fallback: find any valid closed/added kong in hand so phase never desyncs
+            for (let k = 0; k < this.m_Hand.m_iNumTiles; k++) {
+              if (this.m_Hand.m_Tiles[k].flags & handtile_flags.HT_OPEN) continue
+              if (this.m_Hand.Kong(this.m_Hand.m_Tiles[k].tile, false)) {
+                this.m_iState |= playerstate_flags.PS_KONGED
+                break
+              }
             }
           }
+          this.gpGeneral.PlayActionVoice('kong')
+          return playeraction.PA_KONG
+        }
+        let idx = Math.min(this.m_Hand.m_iNumTiles - 1, Math.max(0, move.index ?? this.m_Hand.m_iNumTiles - 1))
+        if (
+          (this.m_Hand.m_Tiles[idx]?.flags & handtile_flags.HT_OPEN) ||
+          (move.tileCode && !this.m_Hand.m_Tiles[idx]?.tile.equals(move.tileCode))
+        ) {
+          let foundIdx = -1
+          if (move.tileCode) {
+            for (let k = this.m_Hand.m_iNumTiles - 1; k >= 0; k--) {
+              if (this.m_Hand.m_Tiles[k].flags & handtile_flags.HT_OPEN) continue
+              if (this.m_Hand.m_Tiles[k].tile.equals(move.tileCode)) {
+                foundIdx = k
+                break
+              }
+            }
+          }
+          if (foundIdx === -1) {
+            for (let k = this.m_Hand.m_iNumTiles - 1; k >= 0; k--) {
+              if (!(this.m_Hand.m_Tiles[k].flags & handtile_flags.HT_OPEN)) {
+                foundIdx = k
+                break
+              }
+            }
+          }
+          if (foundIdx >= 0) idx = foundIdx
         }
         const action = move.act === playeraction.PA_REACH ? playeraction.PA_REACH : playeraction.PA_DISCARD
         if (action === playeraction.PA_REACH) {
@@ -2647,9 +2697,9 @@ export class CGame {
           const busted = this.seats4P.find((s) => s.playerObj.m_iScore <= 0)
           if (busted) {
             if (busted.seatIndex !== this.mySeatIndex) {
-              await this.HighScore()
+              await this.HighScore(3500)
             } else {
-              await this.gpGeneral.GameOver()
+              await this.gpGeneral.GameOver(3500)
             }
             for (const s of this.seats4P) {
               s.playerObj.m_iScore = 25000
@@ -2671,7 +2721,7 @@ export class CGame {
 
           if (this.m_pPlayer.m_iScore <= 0) {
             this.clearLocalSnapshot()
-            await this.gpGeneral.GameOver()
+            await this.gpGeneral.GameOver(this.isPvpMode ? 3500 : undefined)
             this.m_iTotalScore = 0
             if (this.isPvpMode) {
               this.m_pPlayer.m_iScore = 24000
@@ -2682,7 +2732,7 @@ export class CGame {
             this.clearLocalSnapshot()
             this.m_iTotalScore += this.m_pPlayer.m_iScore
             if (this.isPvpMode) {
-              await this.HighScore()
+              await this.HighScore(3500)
               this.m_pPlayer.m_iScore = 24000
               this.m_pBot.m_iScore = 24000
             } else {
@@ -3239,10 +3289,14 @@ export class CGame {
     this.m_iCurGirl = -1
   }
 
-  async HighScore(): Promise<void> {
+  async HighScore(autoContinueMs?: number): Promise<void> {
     await this.gpGeneral.DrawBGFade(this.m_iCurGirl, 2)
     this.gpGeneral.PlayBGMusic(5)
-    await this.gpGeneral.WaitForAnyKey()
+    if (autoContinueMs && autoContinueMs > 0) {
+      await this.gpGeneral.UTIL_Delay(autoContinueMs)
+    } else {
+      await this.gpGeneral.WaitForAnyKey(8000)
+    }
     await this.gpGeneral.ScreenFade(400)
   }
 

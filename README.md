@@ -9,7 +9,23 @@
 
 ## 📋 版本迭代记录 (Version Changelog)
 
-### 🎙️ `v3.5.0` — 台湾麻将甜美女声全牌型/报牌配音、腾讯棋牌倒计时 & 经典快捷语音、联机次局死锁修复版 *(最新)*
+### 🛡️ `v3.5.1` — 长时对局 SSE 断流自愈、HTTP 捎带双保险、流局/终局同步与副露切牌修复版 *(最新)*
+基于线上 `mj.eduready.ai/?room=123456` 连续多局实战的 Nginx 与服务端日志回溯，定位并修复了导致长局或终局（「最后一把」）卡住的 5 项深层隐患：
+1. **🔄 Cloudflare 长连接中断自愈 + `POST /api/room/send` 捎带历史事件双保险**：
+   - **日志根因**：线上日志显示 Cloudflare 代理会在对局 15~30 分钟后断开长连接 `/api/room/events`；旧版 `EventSource` 未绑定 `onerror` 重连检测，一旦进入 `CLOSED` 状态便停止接收 SSE 推送（尽管客户端仍每 6 秒发送 `POST /api/room/send` 心跳）。
+   - **修复方案**：在 [`src/weimzh/pvpManager.ts`](./src/weimzh/pvpManager.ts) 中新增 `EventSource.CLOSED` 自动重连守护，并在 [`server.mjs`](./server.mjs) 的 `POST /api/room/send` 响应体中直接捎带房间最近 25 条事件（`{ ok: true, events }`）。即便 SSE 与公网 MQTT 同时中断，客户端也能通过每 2.8 秒一次的 HTTP POST 响应 100% 拿到对手的出牌与胡牌包，彻底杜绝丢包卡死。
+2. **🀄 修复 20 巡荒牌流局（`IsRoundDraw`）未发同步包导致对手卡死**：
+   - **根因**：当牌局打到最后一张牌（第 20 巡河底牌，`m_iNumDiscarded >= 20` 或四杠散了）且未荣和时，[`src/weimzh/player.ts`](./src/weimzh/player.ts) 的 `CPlayer.ActionDraw()` 直接 `return PA_NONE` 而未向对手发送 `PVP_MOVE` 数据包，导致对手端 `CBot.Action(AS_DRAW)` 卡在 `waitForOpponentMove` 等待 45 秒。现已在 `IsRoundDraw()` 触发时同步广播 `{ phase: 'DRAW', act: PA_NONE }`。
+3. **🏆 修复对局终局（一方点数 `<= 0`）在 `GameOver` / `HighScore` 画面无限等待按键**：
+   - **根因**：当最后一把某方点数归零进入 `GameOver()` 或 `HighScore()` 时，旧版调用 `ReadKey()` 无超时阻塞等待键盘回车，且未开启触控确认气泡，导致双端无法同步开启下一轮。现已改为联机模式下双端同步展示 `3.5秒` 后自动重置点数并无缝进入新局。
+4. **🎴 修复吃/碰副露后打出同种暗牌误匹配 `HT_OPEN` 及暗杠/加杠同步**：
+   - 修复 `CBot.Action(AS_DISCARD)` 按 `tileCode` 查找手牌时未过滤已副露牌（`HT_OPEN`）的问题，防止吃/碰后打出同花色暗牌时 `RemoveTile` 失败；同时为暗杠/加杠（`PA_KONG`）补充 `tileCode` 强校验与兜底查找，并为 `FetchTile` 补齐 `RandomLong` 步进对齐。
+5. **🌐 修复 `http://mj.eduready.ai` 301 重定向剥离 POST 请求体 & WebRTC 重复握手洪泛**：
+   - 在 [`nginx-mj.eduready.ai.conf`](./nginx-mj.eduready.ai.conf) 中允许 80 端口直接反代 `/api/room/`，并在 [`index.html`](./index.html) 入口将 `http://mj.eduready.ai` 自动升级为 `https://`；同时在 `ROOM_ROSTER` 回调中仅对未连接节点发起 WebRTC Offer，消除重连时的 ICE 请求洪泛。
+
+---
+
+### 🎙️ `v3.5.0` — 台湾麻将甜美女声全牌型/报牌配音、腾讯棋牌倒计时 & 经典快捷语音、联机次局死锁修复版
 1. **👩 台湾麻将甜美女声全套真人级配音（95 条独立 `.mp3` 语音包，`zh-TW-HsiaoChenNeural`）**：
    - **打牌实时报牌（34 种牌面全覆盖）**：每打出一张牌自动播报正宗台湾女声（`一萬`~`九萬`、`一筒`~`九筒`、`一條`~`九條`、`東風`/`南風`/`西風`/`北風`、`紅中`/`發財`/`白板`）。
    - **吃/碰/杠/听/胡动作娇嗔播报（7 种动作）**：触发动作时实时播报 `吃！`、`碰！`、`槓！`、`聽牌啦！`、`自摸啦！`、`胡啦！`、`換牌！`。
