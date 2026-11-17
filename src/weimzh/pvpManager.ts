@@ -250,8 +250,8 @@ class PublicWssSignaling {
 
 export class PvpManager {
   public roomId: string = ''
-  public peerId: string = 'p_' + Math.random().toString(36).slice(2, 9)
-  public myName: string = '街机雀神_' + Math.floor(100 + Math.random() * 900)
+  public peerId: string = ''
+  public myName: string = ''
   public myGirl: number = 2
   public betAmount: number = 20
   public gameMode: '2P' | '4P' = '4P'
@@ -289,6 +289,7 @@ export class PvpManager {
   public onRosterUpdate?: (peers: PvpPeerInfo[], joinedPeerId?: string) => void
   public onPeerDisconnected?: (leftPeerId: string) => void
   public onStartPvpMatch?: (payload: StartMatchPayload) => void
+  public onRoomSync?: (payload: { match: StartMatchPayload; moves: PvpMovePacket[] }) => void
   public onRoomRuleChange?: (gameMode: '2P' | '4P', allowDonden: boolean, betAmount: number) => void
   public onSpeakingChange?: (local: boolean, remote: boolean) => void
   public onChatEmote?: (senderName: string, text: string) => void
@@ -296,6 +297,7 @@ export class PvpManager {
   public onPublicStatusChange?: (connected: boolean, text: string) => void
 
   constructor() {
+    this.initPersistentIdentity()
     this.publicSignaling = new PublicWssSignaling(this.peerId + '_' + Math.floor(Math.random() * 999))
     this.publicSignaling.onMessage = (data) => {
       this.handleIncomingMessage(data)
@@ -308,6 +310,51 @@ export class PvpManager {
         this.announcePresence()
       }
     }
+  }
+
+  private initPersistentIdentity(): void {
+    try {
+      const isGuestTest = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('guest') === '1'
+      const store = isGuestTest ? window.sessionStorage : window.localStorage
+
+      let savedId = store.getItem('weimzh_peer_id')
+      if (!savedId) {
+        savedId = 'p_' + Math.random().toString(36).slice(2, 9)
+        store.setItem('weimzh_peer_id', savedId)
+      }
+      this.peerId = savedId
+
+      let savedName = store.getItem('weimzh_player_name')
+      if (!savedName) {
+        const suffix = isGuestTest ? '测试友_' + Math.floor(100 + Math.random() * 900) : Math.floor(100 + Math.random() * 900)
+        savedName = isGuestTest ? `街机${suffix}` : `街机雀神_${suffix}`
+        store.setItem('weimzh_player_name', savedName)
+      }
+      this.myName = savedName
+
+      const savedGirl = store.getItem('weimzh_my_girl')
+      if (savedGirl !== null) {
+        const g = parseInt(savedGirl, 10)
+        if (g >= 0 && g <= 3) this.myGirl = g
+      }
+    } catch {
+      this.peerId = 'p_' + Math.random().toString(36).slice(2, 9)
+      this.myName = '街机雀神_' + Math.floor(100 + Math.random() * 900)
+    }
+  }
+
+  setMyName(newName: string): void {
+    const trimmed = newName.trim().slice(0, 14)
+    if (!trimmed) return
+    this.myName = trimmed
+    try {
+      const isGuestTest = new URLSearchParams(window.location.search).get('guest') === '1'
+      const store = isGuestTest ? window.sessionStorage : window.localStorage
+      store.setItem('weimzh_player_name', trimmed)
+    } catch {}
+    const me = this.peers.find((p) => p.peerId === this.peerId)
+    if (me) me.name = trimmed
+    this.updateMyMeta(this.myGirl, this.betAmount, this.gameMode, this.allowDonden)
   }
 
   async fetchLanInfo(): Promise<void> {
@@ -573,6 +620,20 @@ export class PvpManager {
         }
         if (this.onStartPvpMatch) {
           this.onStartPvpMatch(data.payload)
+        }
+        break
+      }
+
+      case 'ROOM_SYNC': {
+        if (data.match) {
+          this.moveQueue = []
+          this.gameMode = data.match.gameMode || '2P'
+          this.allowDonden = Boolean(data.match.allowDonden)
+          this.betAmount = data.match.betAmount || 20
+          this.onRoomSync?.({
+            match: data.match,
+            moves: Array.isArray(data.moves) ? data.moves : [],
+          })
         }
         break
       }

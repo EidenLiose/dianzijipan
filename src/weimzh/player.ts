@@ -3,7 +3,7 @@ import { CTile, TileSuit } from './tile'
 import { CHand, handtile_flags, chow_location, MAX_HANDTILE } from './hand'
 import { CGeneral, TileDir, SoundId, TILE_WIDTH, TILE_HEIGHT_CONCEALED, TILE_HEIGHT_SHOWN, TILE_HEIGHT_WALL } from './general'
 import { msg, RandomLong, setGameSeed } from './titles'
-import { PvpManager, type SeatPlayerInfo, type StartMatchPayload } from './pvpManager'
+import { PvpManager, type PvpMovePacket, type SeatPlayerInfo, type StartMatchPayload } from './pvpManager'
 
 export enum discarded_flags {
   DT_NULL = 0,
@@ -2081,7 +2081,7 @@ export class CGame {
     this.m_pBot.m_pOpponent = this.m_pPlayer
   }
 
-  startPvpMatchNow(payload: StartMatchPayload): void {
+  startPvpMatchNow(payload: StartMatchPayload, syncMoves?: PvpMovePacket[]): void {
     this.isPvpMode = true
     this.pvpGameMode = payload.gameMode || '2P'
     this.allowDonden = Boolean(payload.allowDonden)
@@ -2090,6 +2090,7 @@ export class CGame {
     this.pvpBetChips = payload.betAmount || 20
     this.pvpOpponentName = this.isPvpHost ? payload.guestName : payload.hostName
     this.m_iCurGirl = this.isPvpHost ? payload.guestGirl : payload.hostGirl
+    this.clearLocalSnapshot()
 
     // Disable single-player queued cheats in PVP
     this.forceNextBonusGame = false
@@ -2150,6 +2151,13 @@ export class CGame {
     this.m_iPendingPoint = 0
     this.abortCurrentRound = true
     this.gpGeneral.pushKey('__ABORT_ROUND__')
+    if (syncMoves && syncMoves.length > 0 && this.pvpManager) {
+      // Pre-populate moveQueue for reconnecting player
+      this.pvpManager.clearMoveQueue()
+      for (const m of syncMoves) {
+        this.pvpManager['moveQueue'].push(m)
+      }
+    }
     this.notifyUI()
   }
 
@@ -2196,15 +2204,175 @@ export class CGame {
   GetPendingPoint(): number { return this.m_iPendingPoint }
   CanDeclareKong(): boolean { return this.m_iKongs < 4 }
 
+  private serializePlayer(p: CBasePlayer) {
+    return {
+      score: p.m_iScore,
+      turn: p.m_iTurn,
+      reach: p.m_fReach,
+      state: p.m_iState,
+      numDiscarded: p.m_iNumDiscarded,
+      discarded: p.m_Discarded.slice(0, p.m_iNumDiscarded).map((d) => ({
+        kind: d.tile.GetKind(),
+        flags: d.flags,
+      })),
+      numTiles: p.m_Hand.m_iNumTiles,
+      tiles: p.m_Hand.m_Tiles.slice(0, p.m_Hand.m_iNumTiles).map((t) => ({
+        kind: t.tile.GetKind(),
+        flags: t.flags,
+        tileset: t.tileset,
+      })),
+      numTileSets: p.m_Hand.m_iNumTileSets,
+      tileSets: p.m_Hand.m_TileSets.slice(0, p.m_Hand.m_iNumTileSets).map((ts) => ({
+        kind: ts.first.GetKind(),
+        type: ts.type,
+      })),
+    }
+  }
+
+  private restorePlayer(p: CBasePlayer, data: any): void {
+    p.NewRound()
+    p.m_iScore = data.score ?? 10000
+    p.m_iTurn = data.turn ?? TURN_EAST
+    p.m_fReach = Boolean(data.reach)
+    p.m_iState = data.state ?? 0
+    p.m_iNumDiscarded = data.numDiscarded ?? 0
+    for (let i = 0; i < p.m_iNumDiscarded && i < MAX_DISCARDED; i++) {
+      p.m_Discarded[i] = {
+        tile: new CTile(data.discarded[i].kind),
+        flags: data.discarded[i].flags ?? 0,
+      }
+    }
+    p.m_Hand.m_iNumTiles = data.numTiles ?? 0
+    for (let i = 0; i < p.m_Hand.m_iNumTiles; i++) {
+      p.m_Hand.m_Tiles[i] = {
+        tile: new CTile(data.tiles[i].kind),
+        flags: data.tiles[i].flags ?? 0,
+        tileset: data.tiles[i].tileset ?? 0,
+      }
+    }
+    p.m_Hand.m_iNumTileSets = data.numTileSets ?? 0
+    for (let i = 0; i < p.m_Hand.m_iNumTileSets; i++) {
+      p.m_Hand.m_TileSets[i] = {
+        first: new CTile(data.tileSets[i].kind),
+        type: data.tileSets[i].type ?? 0,
+      }
+    }
+  }
+
+  saveLocalSnapshot(nextTurnIsPlayer: boolean = true): void {
+    if (this.isPvpMode || this.m_iCurGirl < 0) return
+    try {
+      const snap = {
+        v: 1,
+        ts: Date.now(),
+        curGirl: this.m_iCurGirl,
+        round: this.m_iRound,
+        numDeal: this.m_iNumDeal,
+        pendingPoint: this.m_iPendingPoint,
+        turned: this.m_fTurned,
+        donden: this.m_iDonDen,
+        kongs: this.m_iKongs,
+        dora: this.m_Dora.map((d) => d.GetKind()),
+        remainTiles: CTile.ExportRemainTiles(),
+        nextTurnIsPlayer,
+        player: this.serializePlayer(this.m_pPlayer),
+        bot: this.serializePlayer(this.m_pBot),
+      }
+      window.localStorage.setItem('weimzh_pve_snapshot_v1', JSON.stringify(snap))
+    } catch {}
+  }
+
+  clearLocalSnapshot(): void {
+    try {
+      window.localStorage.removeItem('weimzh_pve_snapshot_v1')
+    } catch {}
+  }
+
+  tryRestoreLocalSnapshot(): boolean {
+    if (this.isPvpMode) return false
+    try {
+      const raw = window.localStorage.getItem('weimzh_pve_snapshot_v1')
+      if (!raw) return false
+      const snap = JSON.parse(raw)
+      if (!snap || snap.v !== 1 || snap.curGirl < 0 || snap.curGirl > 3) return false
+      // Expire snapshots older than 24 hours
+      if (Date.now() - (snap.ts || 0) > 24 * 60 * 60 * 1000) {
+        this.clearLocalSnapshot()
+        return false
+      }
+      this.m_iCurGirl = snap.curGirl
+      this.m_iRound = snap.round ?? TURN_EAST
+      this.m_iNumDeal = snap.numDeal ?? 0
+      this.m_iPendingPoint = snap.pendingPoint ?? 0
+      this.m_fTurned = Boolean(snap.turned)
+      this.m_iDonDen = snap.donden ?? 0
+      this.m_iKongs = snap.kongs ?? 0
+      if (Array.isArray(snap.dora) && snap.dora.length >= 6) {
+        this.m_Dora = snap.dora.map((k: number) => new CTile(k))
+      }
+      if (snap.remainTiles) {
+        CTile.ImportRemainTiles(snap.remainTiles)
+      }
+      this.restorePlayer(this.m_pPlayer, snap.player)
+      this.restorePlayer(this.m_pBot, snap.bot)
+      if (this.m_pPlayer.m_iScore <= 0 || this.m_pBot.m_iScore <= 0) {
+        this.clearLocalSnapshot()
+        return false
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  restartSinglePlayerMatch(): void {
+    this.clearLocalSnapshot()
+    this.isPvpMode = false
+    this.m_iCurGirl = -1
+    this.m_iDonDen = 0
+    this.m_iTotalDonDen = 8
+    this.abortCurrentRound = true
+    this.gpGeneral.pushKey('__ABORT_ROUND__')
+    this.notifyUI()
+  }
+
+  redrawRestoredTable(): void {
+    this.gpGeneral.DrawBG(this.m_iCurGirl, 0)
+    this.m_pPlayer.DrawHand()
+    this.m_pPlayer.DrawDiscarded()
+    this.m_pBot.DrawHand()
+    this.m_pBot.DrawDiscarded()
+    this.gpGeneral.DrawTiles(null, 7, 415, 215, TileDir.WALL_CONCEALED, 0)
+    this.gpGeneral.DrawTiles(null, 7, 415, 200, TileDir.WALL_CONCEALED, 0)
+    this.gpGeneral.DrawTiles(
+      this.m_Dora,
+      this.m_iKongs + 1,
+      Math.floor(415 + TILE_WIDTH * 0.7 * 2),
+      200,
+      TileDir.WALL_SHOWN,
+      0
+    )
+    this.gpGeneral.DrawTurn(this.m_iRound, 387, 202)
+    this.DrawScore()
+    this.DrawDonDen()
+    this.gpGeneral.PlayBGMusic(0)
+    this.notifyUI()
+  }
+
   async RunGame(): Promise<void> {
     this.m_iTotalScore = 0
+    const restoredOnBoot = !this.isPvpMode && this.m_iCurGirl === -1 && this.tryRestoreLocalSnapshot()
+    let skipInitialSetup = restoredOnBoot
+
     while (true) {
-      if (this.m_iCurGirl === -1 && !this.isPvpMode) {
-        await this.SelectCurGirl()
-      }
-      if (!this.isPvpMode) {
-        this.m_iTotalDonDen = 8
-        this.GameInit()
+      if (!skipInitialSetup) {
+        if (this.m_iCurGirl === -1 && !this.isPvpMode) {
+          await this.SelectCurGirl()
+        }
+        if (!this.isPvpMode) {
+          this.m_iTotalDonDen = 8
+          this.GameInit()
+        }
       }
       while (true) {
         this.abortCurrentRound = false
@@ -2228,12 +2396,19 @@ export class CGame {
             break
           }
         } else {
-          await this.NewRound()
-          if (this.abortCurrentRound) continue
+          if (skipInitialSetup) {
+            skipInitialSetup = false
+            this.redrawRestoredTable()
+          } else {
+            await this.NewRound()
+            if (this.abortCurrentRound) continue
+            this.saveLocalSnapshot(true)
+          }
           await this.PlayRound()
           if (this.abortCurrentRound) continue
 
           if (this.m_pPlayer.m_iScore <= 0) {
+            this.clearLocalSnapshot()
             await this.gpGeneral.GameOver()
             this.m_iTotalScore = 0
             if (this.isPvpMode) {
@@ -2242,6 +2417,7 @@ export class CGame {
             }
             break
           } else if (this.m_pBot.m_iScore <= 0) {
+            this.clearLocalSnapshot()
             this.m_iTotalScore += this.m_pPlayer.m_iScore
             if (this.isPvpMode) {
               await this.HighScore()
@@ -2637,6 +2813,7 @@ export class CGame {
 
       pCurrent.DrawHand()
       pCurrent.DrawDiscarded()
+      this.saveLocalSnapshot(pCurrent.IsBot())
       this.notifyUI()
     }
 

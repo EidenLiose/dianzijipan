@@ -13,8 +13,25 @@ const DIST_DIR = path.join(__dirname, 'dist')
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || 'mj.eduready.ai'
 
-// In-memory room registry: Map<roomId, Map<peerId, RoomPeer>>
+// In-memory room registry: Map<roomId, { peers: Map<peerId, RoomPeer>, activeMatch: any, moves: any[], cleanupTimer: any }>
 const rooms = new Map()
+
+function getOrCreateRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      peers: new Map(),
+      activeMatch: null,
+      moves: [],
+      cleanupTimer: null,
+    })
+  }
+  const rm = rooms.get(roomId)
+  if (rm.cleanupTimer) {
+    clearTimeout(rm.cleanupTimer)
+    rm.cleanupTimer = null
+  }
+  return rm
+}
 
 function getLanIps() {
   const nets = os.networkInterfaces()
@@ -33,7 +50,7 @@ function broadcastToRoom(roomId, msg, excludePeerId) {
   const rm = rooms.get(roomId)
   if (!rm) return
   const payload = `data: ${JSON.stringify(msg)}\n\n`
-  for (const [pid, peer] of rm.entries()) {
+  for (const [pid, peer] of rm.peers.entries()) {
     if (pid !== excludePeerId) {
       try {
         peer.res.write(payload)
@@ -45,7 +62,7 @@ function broadcastToRoom(roomId, msg, excludePeerId) {
 function getPeerSummaries(roomId) {
   const rm = rooms.get(roomId)
   if (!rm) return []
-  return Array.from(rm.values()).map((p) => ({
+  return Array.from(rm.peers.values()).map((p) => ({
     peerId: p.peerId,
     name: p.name,
     girl: p.girl,
@@ -56,7 +73,7 @@ function getPeerSummaries(roomId) {
 // Keep SSE connections alive through Nginx / Cloudflare proxies
 setInterval(() => {
   for (const rm of rooms.values()) {
-    for (const peer of rm.values()) {
+    for (const peer of rm.peers.values()) {
       try {
         peer.res.write(': heartbeat\n\n')
       } catch {}
@@ -139,11 +156,8 @@ const server = http.createServer((req, res) => {
       'Access-Control-Allow-Origin': '*',
     })
 
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, new Map())
-    }
-    const rm = rooms.get(roomId)
-    rm.set(peerId, { peerId, name, girl, bet, res })
+    const rm = getOrCreateRoom(roomId)
+    rm.peers.set(peerId, { peerId, name, girl, bet, res })
 
     const peers = getPeerSummaries(roomId)
     // Send initial roster to the newly connected peer immediately
@@ -156,6 +170,17 @@ const server = http.createServer((req, res) => {
           joinedPeerId: peerId,
         })}\n\n`
       )
+      // If a match is already active in this room, push ROOM_SYNC to restore reconnecting player!
+      if (rm.activeMatch) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: 'ROOM_SYNC',
+            roomId,
+            match: rm.activeMatch,
+            moves: rm.moves,
+          })}\n\n`
+        )
+      }
     } catch {}
 
     // Broadcast updated roster to everyone else in the room
@@ -173,9 +198,15 @@ const server = http.createServer((req, res) => {
     req.on('close', () => {
       const currentRm = rooms.get(roomId)
       if (currentRm) {
-        currentRm.delete(peerId)
-        if (currentRm.size === 0) {
-          rooms.delete(roomId)
+        currentRm.peers.delete(peerId)
+        if (currentRm.peers.size === 0) {
+          // Keep activeMatch & moves for 120s so refreshing players can seamlessly rejoin!
+          currentRm.cleanupTimer = setTimeout(() => {
+            const checkRm = rooms.get(roomId)
+            if (checkRm && checkRm.peers.size === 0) {
+              rooms.delete(roomId)
+            }
+          }, 120000)
         } else {
           broadcastToRoom(roomId, {
             type: 'PEER_LEFT',
@@ -201,9 +232,16 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body)
         const roomId = data.roomId || '884821'
         const senderId = data.senderId
+        const rm = rooms.get(roomId)
+        if (data.type === 'START_PVP_MATCH' && data.payload && rm) {
+          rm.activeMatch = data.payload
+          rm.moves = []
+        } else if (data.type === 'PVP_MOVE' && data.move && rm) {
+          rm.moves.push(data.move)
+        }
+
         if (data.type === 'UPDATE_META') {
-          const rm = rooms.get(roomId)
-          const p = rm?.get(senderId)
+          const p = rm?.peers.get(senderId)
           if (p) {
             if (data.girl !== undefined) p.girl = data.girl
             if (data.bet !== undefined) p.bet = data.bet

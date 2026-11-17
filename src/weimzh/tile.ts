@@ -236,4 +236,17 @@ export class CTile {
     }
     return sum
   }
+
+  static ExportRemainTiles(): number[][] {
+    return RemainTiles.map((row) => [...row])
+  }
+
+  static ImportRemainTiles(grid: number[][]): void {
+    if (!Array.isArray(grid) || grid.length < 5) return
+    for (let i = 0; i < 5; i++) {
+      for (let j = 0; j < 9; j++) {
+        RemainTiles[i][j] = Number(grid[i]?.[j] ?? 0)
+      }
+    }
+  }
 }

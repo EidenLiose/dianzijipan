@@ -45,8 +45,8 @@
             <span class="led-val bot">{{ botScore }}</span>
           </div>
           <div class="led-divider">VS</div>
-          <div class="led-item" :class="{ 'speaking-glow': localSpeaking }">
-            <span class="led-lbl">🎙️ {{ myName }}</span>
+          <div class="led-item" :class="{ 'speaking-glow': localSpeaking }" @click.stop="editMyName" title="点击修改我的昵称" style="cursor: pointer;">
+            <span class="led-lbl">🎙️ {{ myName }} ✏️</span>
             <span class="led-val ply">{{ playerScore }}</span>
           </div>
           <div class="led-divider">|</div>
@@ -94,6 +94,9 @@
         </button>
         <button class="sys-btn" @click.stop="crtEnabled = !crtEnabled">
           {{ crtEnabled ? '📺 CRT' : '📺 纯净' }}
+        </button>
+        <button class="sys-btn" @click.stop="restartMatch" title="清空当前牌局进度并重新选关开局">
+          🔄 重开
         </button>
       </div>
     </header>
@@ -890,7 +893,33 @@ const copyPublicDomainLink = () => {
 }
 
 const openSecondTabForTest = () => {
-  window.open(inviteUrl.value, '_blank')
+  const sep = inviteUrl.value.includes('?') ? '&' : '?'
+  window.open(`${inviteUrl.value}${sep}guest=1`, '_blank')
+}
+
+const editMyName = () => {
+  const next = window.prompt('请输入您的固定昵称（自动保存，刷新不变）：', myName.value)
+  if (next && next.trim()) {
+    pvp.setMyName(next.trim())
+    myName.value = pvp.myName
+    showToast(`✏️ 昵称已更新为：${myName.value}`)
+  }
+}
+
+const restartMatch = () => {
+  if (!game) return
+  if (game.isPvpMode) {
+    if (window.confirm('确定要结束当前联机对局并返回单机重开吗？')) {
+      pvp.leaveRoom()
+      roomId.value = ''
+      window.history.replaceState({}, '', '/')
+      game.restartSinglePlayerMatch()
+      showToast('🔄 已返回单机重开新局')
+    }
+  } else {
+    game.restartSinglePlayerMatch()
+    showToast('🔄 已清空本局快照，请重新选择对手开局！')
+  }
 }
 
 const selectMyPvpGirl = (idx: number) => {
@@ -1141,6 +1170,18 @@ onMounted(async () => {
       game.startPvpMatchNow(payload)
       const modeName = payload.gameMode === '4P' ? '🀄 四人麻将环桌局' : '⚔️ 1v1 真人死斗局'
       showToast(`🔥 ${modeName}开始！(押注 ${payload.betAmount} 筹码/番)`)
+    }
+  }
+
+  pvp.onRoomSync = ({ match, moves }) => {
+    showInviteModal.value = false
+    showPvpHandoverBanner.value = false
+    pvpGameMode.value = match.gameMode || '2P'
+    allowDonden.value = Boolean(match.allowDonden)
+    betAmount.value = match.betAmount || 20
+    if (game && !game.isPvpMode) {
+      game.startPvpMatchNow(match, moves)
+      showToast(`🔄 已自动重连并恢复到房间 #${roomId.value} 当前牌局！`)
     }
   }
 
