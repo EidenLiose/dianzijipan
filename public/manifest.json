@@ -1,0 +1,18 @@
+{
+  "name": "电子基盘 · 街机麻将联机旗舰版",
+  "short_name": "电子基盘",
+  "description": "经典街机《电子基盘》1:1像素级复刻，支持公网大厅秒匹、1v1与四人环桌麻将、台湾甜美女声报牌唱番与实时语音对讲。",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#070a12",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

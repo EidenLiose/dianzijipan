@@ -758,7 +758,13 @@ export class PvpManager {
     return this.peers.find((p) => p.peerId !== this.peerId) || null
   }
 
-  updateMyMeta(girl: number, bet: number, gameMode?: '2P' | '4P', allowDonden?: boolean): void {
+  updateMyMeta(
+    girl: number,
+    bet: number,
+    gameMode?: '2P' | '4P',
+    allowDonden?: boolean,
+    isPrivate?: boolean
+  ): void {
     this.myGirl = girl
     this.betAmount = bet
     if (gameMode !== undefined) this.gameMode = gameMode
@@ -776,6 +782,7 @@ export class PvpManager {
       name: this.myName,
       gameMode: this.gameMode,
       allowDonden: this.allowDonden,
+      ...(isPrivate !== undefined ? { isPrivate } : {}),
     })
   }
 

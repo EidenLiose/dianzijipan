@@ -1159,6 +1159,20 @@ function playerDrawLoc(l: number): number {
   return l >= 13 ? 20 + TILE_WIDTH * l + 8 : 20 + TILE_WIDTH * l
 }
 
+export const TILE_CN_NAMES: Record<string, string> = {
+  '1C': '一萬', '2C': '二萬', '3C': '三萬', '4C': '四萬', '5C': '五萬', '6C': '六萬', '7C': '七萬', '8C': '八萬', '9C': '九萬',
+  '1D': '一筒', '2D': '二筒', '3D': '三筒', '4D': '四筒', '5D': '五筒', '6D': '六筒', '7D': '七筒', '8D': '八筒', '9D': '九筒',
+  '1B': '一條', '2B': '二條', '3B': '三條', '4B': '四條', '5B': '五條', '6B': '六條', '7B': '七條', '8B': '八條', '9B': '九條',
+  EW: '東風', SW: '南風', WW: '西風', NW: '北風',
+  RD: '紅中', GD: '發財', WD: '白板',
+}
+
+export interface WaitingTileHint {
+  code: string
+  name: string
+  remain: number
+}
+
 export class CPlayer extends CBasePlayer {
   public m_fAutoDraw: boolean = true
   public m_SanGenRush: CTile[] = Array.from({ length: 9 }, () => new CTile())
@@ -1166,6 +1180,7 @@ export class CPlayer extends CBasePlayer {
   public m_iCountSanGenRush: number = 0
   public currentActionState: actionstate = actionstate.AS_DRAW
   public currentSelectedAct: playeraction = playeraction.PA_DRAW
+  public selectedTileLetter: string = ''
   public lastDrawInfo: { act: number; tileCode?: string; chowLocation?: number } = { act: playeraction.PA_DRAW }
 
   IsBot(): boolean {
@@ -1215,6 +1230,10 @@ export class CPlayer extends CBasePlayer {
     }
 
     let charCode = 65 + loc
+    const canShowTenpaiDots =
+      !shown &&
+      this.currentActionState === actionstate.AS_DISCARD &&
+      !this.m_fReach
     for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
       if (
         (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) &&
@@ -1222,22 +1241,123 @@ export class CPlayer extends CBasePlayer {
       ) {
         continue
       }
-      this.gpGeneral.EraseArea(playerDrawLoc(loc), 380, TILE_WIDTH, 100)
+      const letter = String.fromCharCode(charCode)
+      const isSelected = !shown && this.selectedTileLetter === letter
+      const drawX = playerDrawLoc(loc)
+      const drawY = shown ? 396 : isSelected ? 368 : 380
+
+      this.gpGeneral.EraseArea(drawX, 365, TILE_WIDTH, 115)
       this.gpGeneral.DrawTile(
         this.m_Hand.m_Tiles[i].tile,
-        playerDrawLoc(loc),
-        shown ? 396 : 380,
+        drawX,
+        drawY,
         shown ? TileDir.PLAYER_SHOWN : TileDir.PLAYER_CONCEALED
       )
-      this.gpGeneral.DrawUTF8Text(String.fromCharCode(charCode), playerDrawLoc(loc) + 15, 455)
+      if (isSelected) {
+        const ctx = this.gpGeneral.ctx
+        ctx.save()
+        ctx.strokeStyle = '#fde047'
+        ctx.lineWidth = 2.5
+        ctx.strokeRect(drawX + 1, drawY + 1, TILE_WIDTH - 2, 64)
+        ctx.restore()
+      } else if (canShowTenpaiDots && !(this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_LOCKED)) {
+        const testH = this.m_Hand.clone()
+        testH.RemoveTile(i)
+        if (testH.IsReady()) {
+          const ctx = this.gpGeneral.ctx
+          ctx.save()
+          ctx.fillStyle = '#4ade80'
+          ctx.strokeStyle = '#052e16'
+          ctx.lineWidth = 1.5
+          ctx.beginPath()
+          ctx.arc(drawX + TILE_WIDTH / 2, 372, 4.5, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.stroke()
+          ctx.restore()
+        }
+      }
+      this.gpGeneral.DrawUTF8Text(letter, drawX + 15, 455)
       charCode++
       loc++
     }
 
     if (charCode <= 78) {
-      this.gpGeneral.EraseArea(playerDrawLoc(13), 380, TILE_WIDTH, 100)
+      this.gpGeneral.EraseArea(playerDrawLoc(13), 365, TILE_WIDTH, 115)
       this.gpGeneral.DrawUTF8Text('N', playerDrawLoc(13) + 15, 455)
     }
+  }
+
+  getWaitingTilesInfo(): WaitingTileHint[] {
+    if (this.gpGame.m_iCurGirl < 0 && !this.gpGame.isPvpMode) return []
+    // Only evaluate 13-tile waiting state (when waiting for draw or opponent turn)
+    let concealedPlusMelds = 0
+    for (let i = 0; i < this.m_Hand.m_iNumTileSets; i++) {
+      if ((this.m_Hand.m_TileSets[i].type & handtile_flags.HT_OPEN) && !(this.m_Hand.m_TileSets[i].type & handtile_flags.HT_RON)) {
+        concealedPlusMelds += 3
+      }
+    }
+    for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
+      if ((this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) && !(this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_RON)) continue
+      concealedPlusMelds++
+    }
+    if (concealedPlusMelds !== 13) return []
+
+    const waits: CTile[] = []
+    const n = this.m_Hand.GetWaitingTile(waits, 13)
+    const out: WaitingTileHint[] = []
+    const seenCodes = new Set<string>()
+    for (let i = 0; i < n; i++) {
+      const code = waits[i].GetCode()
+      if (!code || code === 'XX' || seenCodes.has(code)) continue
+      seenCodes.add(code)
+      out.push({
+        code,
+        name: TILE_CN_NAMES[code] || code,
+        remain: this.gpGame.getVisibleRemainCount(waits[i]),
+      })
+    }
+    return out
+  }
+
+  getDiscardTenpaiMap(): Record<string, WaitingTileHint[]> {
+    const res: Record<string, WaitingTileHint[]> = {}
+    if (this.currentActionState !== actionstate.AS_DISCARD) return res
+    let loc = 0
+    for (let i = 0; i < this.m_Hand.m_iNumTileSets; i++) {
+      if ((this.m_Hand.m_TileSets[i].type & handtile_flags.HT_OPEN) && !(this.m_Hand.m_TileSets[i].type & handtile_flags.HT_RON)) {
+        loc += 3
+      }
+    }
+    let charCode = 65 + loc
+    for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
+      if ((this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) && !(this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_RON)) {
+        continue
+      }
+      const letter = String.fromCharCode(charCode)
+      charCode++
+      loc++
+      if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_LOCKED) continue
+      const testH = this.m_Hand.clone()
+      testH.RemoveTile(i)
+      const waits: CTile[] = []
+      const n = testH.GetWaitingTile(waits, 13)
+      if (n > 0) {
+        const list: WaitingTileHint[] = []
+        const seen = new Set<string>()
+        for (let k = 0; k < n; k++) {
+          const code = waits[k].GetCode()
+          if (!code || code === 'XX' || seen.has(code)) continue
+          seen.add(code)
+          // Note: if the discarded tile itself is equal to waits[k], subtract 1 more from visible remain
+          let rem = this.gpGame.getVisibleRemainCount(waits[k])
+          list.push({ code, name: TILE_CN_NAMES[code] || code, remain: rem })
+        }
+        if (list.length > 0) {
+          res[letter] = list
+        }
+      }
+    }
+    return res
   }
 
   DrawDiscarded(): void {
@@ -1534,6 +1654,7 @@ export class CPlayer extends CBasePlayer {
     }
 
     while (true) {
+      this.selectedTileLetter = ''
       this.DrawAction(act)
       let key: string
       const hasCallOption =
@@ -1720,6 +1841,7 @@ export class CPlayer extends CBasePlayer {
     }
 
     while (true) {
+      this.selectedTileLetter = ''
       this.DrawAction(act)
       let key: string
       if (
@@ -2450,8 +2572,59 @@ export class CGame {
   public turnCountdown: number = 0
   public isWaitingOpponentTurn: boolean = false
   public onAutoPlayTriggered?: (reason: string) => void
+  public onRoundSettled?: (summary: {
+    won: boolean
+    isDraw: boolean
+    fan: number
+    scoreDelta: number
+    chipDelta: number
+    yakuTitle: string
+    isPvp: boolean
+  }) => void
 
   public onUIUpdate?: () => void
+
+  // Anti-cheat visible remaining tile counter (counts 4 minus own hand, all discard rivers, open melds, and shown Dora)
+  getVisibleRemainCount(target: CTile): number {
+    let used = 0
+    // 1. Shown Dora indicators
+    for (let i = 0; i < this.m_iKongs + 1 && i < 5; i++) {
+      if (this.m_Dora[i]?.equals(target)) used++
+    }
+    // 2. Local player's full hand (concealed + open)
+    for (let i = 0; i < this.m_pPlayer.m_Hand.m_iNumTiles; i++) {
+      if (this.m_pPlayer.m_Hand.m_Tiles[i].tile.equals(target)) used++
+    }
+    // 3. Discards and opponents' open melds
+    if (this.isPvpMode && this.pvpGameMode === '4P' && this.seats4P.length === 4) {
+      for (const s of this.seats4P) {
+        const p = s.playerObj
+        for (let i = 0; i < p.m_iNumDiscarded; i++) {
+          if (p.m_Discarded[i].tile.equals(target)) used++
+        }
+        if (s.seatIndex !== this.mySeatIndex) {
+          for (let i = 0; i < p.m_Hand.m_iNumTiles; i++) {
+            if ((p.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) && p.m_Hand.m_Tiles[i].tile.equals(target)) {
+              used++
+            }
+          }
+        }
+      }
+    } else {
+      for (let i = 0; i < this.m_pPlayer.m_iNumDiscarded; i++) {
+        if (this.m_pPlayer.m_Discarded[i].tile.equals(target)) used++
+      }
+      for (let i = 0; i < this.m_pBot.m_iNumDiscarded; i++) {
+        if (this.m_pBot.m_Discarded[i].tile.equals(target)) used++
+      }
+      for (let i = 0; i < this.m_pBot.m_Hand.m_iNumTiles; i++) {
+        if ((this.m_pBot.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) && this.m_pBot.m_Hand.m_Tiles[i].tile.equals(target)) {
+          used++
+        }
+      }
+    }
+    return Math.max(0, 4 - used)
+  }
 
   toggleAutoPlay(): boolean {
     this.isAutoPlay = !this.isAutoPlay
@@ -3328,9 +3501,12 @@ export class CGame {
       await this.gpGeneral.UTIL_Delay(1300)
       pWinner.m_iScore += pWinner.m_Result.score
       pWinner.m_pOpponent.m_iScore -= pWinner.m_Result.score
+      const fanCount = Math.max(1, pWinner.HasFan())
+      const baseBet = this.isPvpMode ? this.pvpBetChips : 50
+      const chipDelta = baseBet * fanCount
+      const playerWon = !pWinner.IsBot()
       if (this.isPvpMode) {
-        const chipDelta = this.pvpBetChips * Math.max(1, pWinner.HasFan())
-        if (!pWinner.IsBot()) {
+        if (playerWon) {
           this.pvpPlayerChips += chipDelta
           this.pvpOpponentChips = Math.max(0, this.pvpOpponentChips - chipDelta)
         } else {
@@ -3338,6 +3514,16 @@ export class CGame {
           this.pvpPlayerChips = Math.max(0, this.pvpPlayerChips - chipDelta)
         }
       }
+      const levelNames = ['一番', '二番', '三番', '四番', '满贯', '跳满', '倍满', '三倍满', '役满']
+      this.onRoundSettled?.({
+        won: playerWon,
+        isDraw: false,
+        fan: fanCount,
+        scoreDelta: playerWon ? pWinner.m_Result.score : -pWinner.m_Result.score,
+        chipDelta: playerWon ? chipDelta : -chipDelta,
+        yakuTitle: levelNames[Math.min(8, Math.max(0, pWinner.m_Result.level))] || `${fanCount}番`,
+        isPvp: this.isPvpMode,
+      })
       this.gpGeneral.PlaySound(SoundId.SND_SOUND1)
       this.DrawScore(435, 300)
       this.notifyUI()
@@ -3856,6 +4042,19 @@ export class CGame {
 
       this.m_iPendingPoint = 0
       this.pvpPlayerChips = this.seats4P[this.mySeatIndex]?.chips ?? 1000
+      const playerWon4P = pWinnerSeat.seatIndex === this.mySeatIndex
+      const playerLost4P = isTsumo ? !playerWon4P : pLoserSeat?.seatIndex === this.mySeatIndex
+      const myChipDelta4P = playerWon4P ? (isTsumo ? chipDelta * 3 : chipDelta) : playerLost4P ? -chipDelta : 0
+      const levelNames4P = ['一番', '二番', '三番', '四番', '满贯', '跳满', '倍满', '三倍满', '役满']
+      this.onRoundSettled?.({
+        won: playerWon4P,
+        isDraw: false,
+        fan: fanCount,
+        scoreDelta: playerWon4P ? winScore : playerLost4P ? -winScore : 0,
+        chipDelta: myChipDelta4P,
+        yakuTitle: levelNames4P[Math.min(8, Math.max(0, winP.m_Result.level))] || `${fanCount}番`,
+        isPvp: true,
+      })
       this.gpGeneral.PlaySound(SoundId.SND_SOUND1)
       this.notifyUI()
       await this.gpGeneral.UTIL_Delay(3200)

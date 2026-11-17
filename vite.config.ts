@@ -57,9 +57,53 @@ function pvpRoomServerPlugin(): Plugin {
       server.middlewares.use((req, res, next) => {
         if (!req.url) return next()
 
-        if (req.url.startsWith('/api/room/info')) {
+        if (req.url.startsWith('/api/room/info') || req.url.startsWith('/api/room/list')) {
+          const publicRooms: any[] = []
+          let totalPeers = 0
+          for (const [rId, rm] of rooms.entries()) {
+            totalPeers += rm.size
+            if (rm.size > 0) {
+              const first = Array.from(rm.values())[0]
+              publicRooms.push({
+                roomId: rId,
+                hostName: first?.name || '街机雀神',
+                hostGirl: first?.girl ?? 2,
+                peerCount: rm.size,
+                maxPeers: 2,
+                gameMode: '2P',
+                betAmount: first?.bet || 20,
+                allowDonden: false,
+                inGame: rm.size >= 2,
+              })
+            }
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ lanIps: getLanIps(), port: 3000 }))
+          res.end(
+            JSON.stringify({
+              lanIps: getLanIps(),
+              port: 3000,
+              activeRooms: rooms.size,
+              onlinePlayers: Math.max(1, totalPeers),
+              rooms: publicRooms,
+              notices: ['🎉 欢迎来到《电子基盘·商业旗舰版》！支持台湾甜美女声唱番、听牌助手与每日金豆福利！'],
+            })
+          )
+          return
+        }
+
+        if (req.url.startsWith('/api/leaderboard')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              ok: true,
+              list: [
+                { peerId: 'npc_masako', name: '雅子·街机魔王', chips: 88000, wins: 42, games: 55, maxFan: 13, rankTitle: '👑 电子雀神' },
+                { peerId: 'npc_yui', name: '结衣·清一色女王', chips: 52000, wins: 28, games: 40, maxFan: 8, rankTitle: '💎 钻石雀圣' },
+                { peerId: 'npc_rumi', name: '留美·立直快枪手', chips: 31000, wins: 19, games: 31, maxFan: 6, rankTitle: '🥇 黄金雀豪' },
+                { peerId: 'npc_miki', name: '美纪·雀庄看板娘', chips: 18500, wins: 12, games: 24, maxFan: 5, rankTitle: '🥈 白银雀杰' },
+              ],
+            })
+          )
           return
         }
 

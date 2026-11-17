@@ -10,19 +10,80 @@ import { fileURLToPath } from 'node:url'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const DIST_DIR = path.join(__dirname, 'dist')
+const DATA_DIR = path.join(__dirname, 'data')
+const LEADERBOARD_FILE = path.join(DATA_DIR, 'leaderboard.json')
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || 'mj.eduready.ai'
 
-// In-memory room registry: Map<roomId, { peers: Map<peerId, RoomPeer>, activeMatch: any, moves: any[], cleanupTimer: any }>
+// In-memory room registry
 const rooms = new Map()
+
+// Global marquee notices (Big Wins & System Broadcasts)
+const globalNotices = [
+  '🎉 欢迎来到《电子基盘·街机商业旗舰版》！支持台湾甜美女声唱番、公网大厅秒匹与每日金豆福利！',
+]
+
+// Persistent Leaderboard Registry: Map<peerId, PlayerRankRecord>
+const leaderboard = new Map()
+
+function loadLeaderboard() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+    if (fs.existsSync(LEADERBOARD_FILE)) {
+      const arr = JSON.parse(fs.readFileSync(LEADERBOARD_FILE, 'utf-8'))
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item && item.peerId) leaderboard.set(item.peerId, item)
+        }
+      }
+    }
+  } catch {}
+  if (leaderboard.size === 0) {
+    // Seed classic arcade challengers so leaderboard is lively out of the box
+    const seeds = [
+      { peerId: 'npc_masako', name: '雅子·街机魔王', chips: 88000, wins: 42, games: 55, maxFan: 13, rankTitle: '👑 电子雀神', updatedAt: Date.now() },
+      { peerId: 'npc_yui', name: '结衣·清一色女王', chips: 52000, wins: 28, games: 40, maxFan: 8, rankTitle: '💎 钻石雀圣', updatedAt: Date.now() },
+      { peerId: 'npc_rumi', name: '留美·立直快枪手', chips: 31000, wins: 19, games: 31, maxFan: 6, rankTitle: '🥇 黄金雀豪', updatedAt: Date.now() },
+      { peerId: 'npc_miki', name: '美纪·雀庄看板娘', chips: 18500, wins: 12, games: 24, maxFan: 5, rankTitle: '🥈 白银雀杰', updatedAt: Date.now() },
+    ]
+    for (const s of seeds) leaderboard.set(s.peerId, s)
+  }
+}
+
+let saveTimer = null
+function scheduleSaveLeaderboard() {
+  if (saveTimer) return
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+      const sorted = getSortedLeaderboard()
+      fs.writeFileSync(LEADERBOARD_FILE, JSON.stringify(sorted.slice(0, 100), null, 2), 'utf-8')
+    } catch {}
+  }, 2000)
+}
+
+function getSortedLeaderboard() {
+  return Array.from(leaderboard.values())
+    .sort((a, b) => (b.chips || 0) - (a.chips || 0) || (b.wins || 0) - (a.wins || 0))
+    .slice(0, 30)
+}
+
+loadLeaderboard()
 
 function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
+      roomId,
       peers: new Map(),
+      gameMode: '2P',
+      betAmount: 20,
+      allowDonden: false,
+      isPrivate: false,
       activeMatch: null,
       moves: [],
       recentEvents: [],
+      createdAt: Date.now(),
       cleanupTimer: null,
     })
   }
@@ -134,8 +195,30 @@ const server = http.createServer((req, res) => {
     return
   }
 
-  // 1. Room Info API
-  if (req.url.startsWith('/api/room/info')) {
+  // 1. Room Info & Public Lobby List API
+  if (req.url.startsWith('/api/room/info') || req.url.startsWith('/api/room/list')) {
+    let totalPeers = 0
+    const publicRooms = []
+    for (const [rId, rm] of rooms.entries()) {
+      const pCount = rm.peers.size
+      totalPeers += pCount
+      if (pCount > 0 && !rm.isPrivate) {
+        const firstPeer = Array.from(rm.peers.values())[0]
+        const mode = rm.activeMatch?.gameMode || rm.gameMode || '2P'
+        const maxPeers = mode === '4P' ? 4 : 2
+        publicRooms.push({
+          roomId: rId,
+          hostName: firstPeer?.name || '街机雀神',
+          hostGirl: firstPeer?.girl ?? 2,
+          peerCount: pCount,
+          maxPeers,
+          gameMode: mode,
+          betAmount: rm.activeMatch?.betAmount || rm.betAmount || firstPeer?.bet || 20,
+          allowDonden: Boolean(rm.activeMatch ? rm.activeMatch.allowDonden : rm.allowDonden),
+          inGame: Boolean(rm.activeMatch && pCount >= maxPeers),
+        })
+      }
+    }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
@@ -147,9 +230,60 @@ const server = http.createServer((req, res) => {
         lanIps: getLanIps(),
         port: PORT,
         activeRooms: rooms.size,
+        onlinePlayers: Math.max(1, totalPeers),
+        rooms: publicRooms,
+        notices: globalNotices.slice(-8),
       })
     )
     return
+  }
+
+  // 1b. Leaderboard API (GET & POST)
+  if (req.url.startsWith('/api/leaderboard')) {
+    if (req.method === 'GET') {
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end(JSON.stringify({ ok: true, list: getSortedLeaderboard(), notices: globalNotices.slice(-8) }))
+      return
+    }
+    if (req.method === 'POST') {
+      let body = ''
+      req.on('data', (c) => {
+        body += c
+        if (body.length > 1e5) req.socket.destroy()
+      })
+      req.on('end', () => {
+        try {
+          const d = JSON.parse(body)
+          if (d && d.peerId && d.name) {
+            const prev = leaderboard.get(d.peerId) || {}
+            leaderboard.set(d.peerId, {
+              peerId: String(d.peerId).slice(0, 32),
+              name: String(d.name).slice(0, 18),
+              chips: Math.max(0, Number(d.chips ?? prev.chips ?? 10000)),
+              wins: Math.max(Number(prev.wins || 0), Number(d.wins || 0)),
+              games: Math.max(Number(prev.games || 0), Number(d.games || 0)),
+              maxFan: Math.max(Number(prev.maxFan || 0), Number(d.maxFan || 0)),
+              rankTitle: String(d.rankTitle || prev.rankTitle || '🥉 青铜雀士').slice(0, 16),
+              updatedAt: Date.now(),
+            })
+            if (d.bigWinNotice && typeof d.bigWinNotice === 'string') {
+              globalNotices.push(d.bigWinNotice.slice(0, 120))
+              if (globalNotices.length > 20) globalNotices.splice(0, globalNotices.length - 20)
+            }
+            scheduleSaveLeaderboard()
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+          res.end(JSON.stringify({ ok: true, list: getSortedLeaderboard() }))
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+          res.end(JSON.stringify({ ok: false }))
+        }
+      })
+      return
+    }
   }
 
   // 2. Real-time SSE Room Stream API
@@ -306,6 +440,12 @@ const server = http.createServer((req, res) => {
             if (data.girl !== undefined) p.girl = data.girl
             if (data.bet !== undefined) p.bet = data.bet
             if (data.name !== undefined) p.name = data.name
+          }
+          if (rm) {
+            if (data.gameMode !== undefined) rm.gameMode = data.gameMode
+            if (data.bet !== undefined) rm.betAmount = data.bet
+            if (data.allowDonden !== undefined) rm.allowDonden = Boolean(data.allowDonden)
+            if (data.isPrivate !== undefined) rm.isPrivate = Boolean(data.isPrivate)
           }
           broadcastToRoom(roomId, data, senderId)
         } else {

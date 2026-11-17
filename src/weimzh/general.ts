@@ -65,6 +65,7 @@ export class CGeneral {
 
   public isMusicMuted: boolean = false
   public isSoundMuted: boolean = false
+  public isVoiceMuted: boolean = false
   public isAudioDucked: boolean = false
   public hasActivePrompt: boolean = false
   private duckTimeout: any = null
@@ -600,7 +601,7 @@ export class CGeneral {
   }
 
   PlayTileVoice(tileCode: string): void {
-    if (this.isSoundMuted || !tileCode || tileCode === 'XX') return
+    if (this.isSoundMuted || this.isVoiceMuted || !tileCode || tileCode === 'XX') return
     try {
       const a = new Audio(`/weimzh/voice/tiles/${tileCode}.mp3`)
       a.volume = 1.0
@@ -609,7 +610,7 @@ export class CGeneral {
   }
 
   PlayActionVoice(act: 'chow' | 'pung' | 'kong' | 'reach' | 'tsumo' | 'ron' | 'donden'): void {
-    if (this.isSoundMuted) return
+    if (this.isSoundMuted || this.isVoiceMuted) return
     try {
       const a = new Audio(`/weimzh/voice/actions/${act}.mp3`)
       a.volume = 1.0
@@ -618,7 +619,7 @@ export class CGeneral {
   }
 
   PlayYakuVoice(yakuKey: string): Promise<void> {
-    if (this.isSoundMuted) return this.UTIL_Delay(180)
+    if (this.isSoundMuted || this.isVoiceMuted) return this.UTIL_Delay(180)
     return new Promise((resolve) => {
       try {
         const a = new Audio(`/weimzh/voice/yaku/${yakuKey}.mp3`)
