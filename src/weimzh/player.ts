@@ -1180,6 +1180,8 @@ export class CPlayer extends CBasePlayer {
   public m_iCountSanGenRush: number = 0
   public currentActionState: actionstate = actionstate.AS_DRAW
   public currentSelectedAct: playeraction = playeraction.PA_DRAW
+  public isMyTurnToDiscard: boolean = false
+  public isMyTurnToRespond: boolean = false
   public selectedTileLetter: string = ''
   public lastDrawInfo: { act: number; tileCode?: string; chowLocation?: number } = { act: playeraction.PA_DRAW }
 
@@ -1232,7 +1234,7 @@ export class CPlayer extends CBasePlayer {
     let charCode = 65 + loc
     const canShowTenpaiDots =
       !shown &&
-      this.currentActionState === actionstate.AS_DISCARD &&
+      this.isMyTurnToDiscard &&
       !this.m_fReach
     for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
       if (
@@ -1303,7 +1305,7 @@ export class CPlayer extends CBasePlayer {
     if (concealedPlusMelds !== 13) return []
 
     const waits: CTile[] = []
-    const n = this.m_Hand.GetWaitingTile(waits, 13)
+    const n = this.m_Hand.GetWaitingTile(waits, 34)
     const out: WaitingTileHint[] = []
     const seenCodes = new Set<string>()
     for (let i = 0; i < n; i++) {
@@ -1321,7 +1323,7 @@ export class CPlayer extends CBasePlayer {
 
   getDiscardTenpaiMap(): Record<string, WaitingTileHint[]> {
     const res: Record<string, WaitingTileHint[]> = {}
-    if (this.currentActionState !== actionstate.AS_DISCARD) return res
+    if (!this.isMyTurnToDiscard) return res
     let loc = 0
     for (let i = 0; i < this.m_Hand.m_iNumTileSets; i++) {
       if ((this.m_Hand.m_TileSets[i].type & handtile_flags.HT_OPEN) && !(this.m_Hand.m_TileSets[i].type & handtile_flags.HT_RON)) {
@@ -1340,7 +1342,7 @@ export class CPlayer extends CBasePlayer {
       const testH = this.m_Hand.clone()
       testH.RemoveTile(i)
       const waits: CTile[] = []
-      const n = testH.GetWaitingTile(waits, 13)
+      const n = testH.GetWaitingTile(waits, 34)
       if (n > 0) {
         const list: WaitingTileHint[] = []
         const seen = new Set<string>()
@@ -1427,8 +1429,8 @@ export class CPlayer extends CBasePlayer {
     this.gpGeneral.DrawMessage(msg('hint_firstchance'))
 
     while (true) {
-      const key = await this.gpGeneral.ReadKey()
-      if (key === 'Enter' || key === ' ') break
+      const key = await this.gpGeneral.ReadKeyWithTimeout(20000)
+      if (key === 'Enter' || key === ' ' || key === '__TIMEOUT__' || key === '__ABORT_ROUND__') break
       const index = this.KeyToIndex(key)
       if (index < 0 || index >= 13 || (changed & (1 << index))) continue
       changed |= 1 << index
@@ -1486,7 +1488,8 @@ export class CPlayer extends CBasePlayer {
 
     let flags = 0
     for (let chance = 0; chance < 3; chance++) {
-      const k = await this.gpGeneral.ReadKey()
+      const k = await this.gpGeneral.ReadKeyWithTimeout(15000)
+      if (k === '__TIMEOUT__' || k === '__ABORT_ROUND__') break
       const idx = k.toLowerCase().charCodeAt(0) - 97
       if (idx < 0 || idx >= 10 || (flags & (1 << idx))) {
         chance--
@@ -1532,8 +1535,8 @@ export class CPlayer extends CBasePlayer {
     this.gpGeneral.PlaySound(SoundId.SND_SOUND2)
 
     while (num < 3) {
-      const key = await this.gpGeneral.ReadKey()
-      if (key === 'Enter' || key === ' ') break
+      const key = await this.gpGeneral.ReadKeyWithTimeout(20000)
+      if (key === 'Enter' || key === ' ' || key === '__TIMEOUT__' || key === '__ABORT_ROUND__') break
       const index = this.KeyToIndex(key)
       if (index < 0 || index >= 13 || (changed & (1 << index))) continue
       changed |= 1 << index
@@ -1575,8 +1578,23 @@ export class CPlayer extends CBasePlayer {
 
   async Action(state: actionstate): Promise<playeraction> {
     this.currentActionState = state
-    if (state === actionstate.AS_DRAW) return this.ActionDraw()
-    return this.ActionDiscard()
+    if (state === actionstate.AS_DRAW) {
+      try {
+        return await this.ActionDraw()
+      } finally {
+        this.isMyTurnToRespond = false
+        this.gpGame.notifyUI()
+      }
+    }
+    this.isMyTurnToDiscard = true
+    try {
+      return await this.ActionDiscard()
+    } finally {
+      this.isMyTurnToDiscard = false
+      this.currentActionState = actionstate.AS_DRAW
+      this.selectedTileLetter = ''
+      this.gpGame.notifyUI()
+    }
   }
 
   private async ActionDraw(): Promise<playeraction> {
@@ -1679,6 +1697,8 @@ export class CPlayer extends CBasePlayer {
           key = 'n'
         }
       } else {
+        this.isMyTurnToRespond = true
+        this.gpGame.notifyUI()
         const remainMs = Math.max(500, deadline - Date.now())
         key = await this.gpGeneral.ReadKeyWithTimeout(remainMs, (sec) => {
           this.gpGame.turnCountdown = sec
@@ -1863,6 +1883,7 @@ export class CPlayer extends CBasePlayer {
           key = loc >= 0 && loc <= 12 ? String.fromCharCode(97 + loc) : 'n'
         }
       } else {
+        this.gpGame.notifyUI()
         const remainMs = Math.max(500, deadline - Date.now())
         key = await this.gpGeneral.ReadKeyWithTimeout(remainMs, (sec) => {
           this.gpGame.turnCountdown = sec
@@ -2102,6 +2123,7 @@ export class CPlayer extends CBasePlayer {
               act: playeraction.PA_KONG,
               index: i,
               tileCode: kTile.GetCode(),
+              prevDraw: { ...this.lastDrawInfo },
             })
           }
           return playeraction.PA_KONG
@@ -2301,7 +2323,14 @@ export class CBot extends CBasePlayer {
           this.gpGeneral.PlayActionVoice('ron')
           return playeraction.PA_MAHJONG
         }
-        return playeraction.PA_NONE
+        // Fallback safety: never trigger fake round draw unless act === PA_NONE or IsRoundDraw()
+        if (this.IsRoundDraw()) return playeraction.PA_NONE
+        for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
+          this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+        }
+        this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
+        this.m_iState &= playerstate_flags.PS_CALLREACH | playerstate_flags.PS_KONGED
+        return playeraction.PA_DRAW
       } else {
         if (move.act === playeraction.PA_MAHJONG) {
           if (move.winHand) {
@@ -2717,14 +2746,9 @@ export class CGame {
     this.pvpRoundCounter = 0
     this.m_iPendingPoint = 0
     this.abortCurrentRound = true
-    this.gpGeneral.pushKey('__ABORT_ROUND__')
+    this.gpGeneral.abortAllKeys()
     if (this.pvpManager) {
       this.pvpManager.clearMoveQueue()
-      if (syncMoves && syncMoves.length > 0) {
-        for (const m of syncMoves) {
-          this.pvpManager['moveQueue'].push(m)
-        }
-      }
     }
     this.notifyUI()
   }
@@ -2900,7 +2924,7 @@ export class CGame {
     this.m_iDonDen = 0
     this.m_iTotalDonDen = 8
     this.abortCurrentRound = true
-    this.gpGeneral.pushKey('__ABORT_ROUND__')
+    this.gpGeneral.abortAllKeys()
     this.notifyUI()
   }
 
@@ -3278,6 +3302,7 @@ export class CGame {
       pCurrent = pCurrent.m_pOpponent
       this.gpGeneral.PlaySound(SoundId.SND_BOOM)
       await this.gpGeneral.UTIL_Delay(160)
+      if (this.abortCurrentRound) return
     }
 
     this.m_pBot.m_Hand.m_iNumTiles = 13
@@ -3489,16 +3514,20 @@ export class CGame {
         )
       }
       await this.gpGeneral.UTIL_Delay(2200)
+      if (this.abortCurrentRound) return
 
       this.gpGeneral.DrawBG(this.m_iCurGirl, 1)
       pWinner.DrawHand(true)
       await this.gpGeneral.UTIL_Delay(450)
+      if (this.abortCurrentRound) return
       this.gpGeneral.PlaySound(SoundId.SND_SOUND3)
       pWinner.DrawResult()
       this.DrawScore(435, 300)
       await pWinner.AnnounceResultVoice()
+      if (this.abortCurrentRound) return
 
       await this.gpGeneral.UTIL_Delay(1300)
+      if (this.abortCurrentRound) return
       pWinner.m_iScore += pWinner.m_Result.score
       pWinner.m_pOpponent.m_iScore -= pWinner.m_Result.score
       const fanCount = Math.max(1, pWinner.HasFan())
@@ -3560,6 +3589,7 @@ export class CGame {
   async StageClear(): Promise<void> {
     this.m_iLevelClearFlag |= 1 << this.m_iCurGirl
     await this.HighScore()
+    if (this.abortCurrentRound || this.isPvpMode) return
     this.m_iCurGirl = -1
   }
 

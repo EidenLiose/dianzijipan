@@ -54,6 +54,14 @@ export const MAX_CONCEALED = 14
 
 const TTW_CODES = ['1C', '9C', '1D', '9D', '1B', '9B', 'EW', 'SW', 'WW', 'NW', 'RD', 'GD', 'WD']
 
+export const ALL_34_TILE_CODES = [
+  '1C', '2C', '3C', '4C', '5C', '6C', '7C', '8C', '9C',
+  '1D', '2D', '3D', '4D', '5D', '6D', '7D', '8D', '9D',
+  '1B', '2B', '3B', '4B', '5B', '6B', '7B', '8B', '9B',
+  'EW', 'SW', 'WW', 'NW',
+  'RD', 'GD', 'WD',
+]
+
 export class CHand {
   public m_Tiles: handtile_t[] = []
   public m_iNumTiles: number = 0
@@ -385,6 +393,7 @@ export class CHand {
   CanMahjong(t: CTile): boolean {
     const tmp = this.clone()
     tmp.AddTile(t)
+    tmp.Sort()
     return tmp.GoMahjong_real()
   }
 
@@ -618,244 +627,27 @@ export class CHand {
   }
 
   IsReady(): boolean {
-    let concealed = 0
-    const t: CTile[] = []
-
-    for (let i = 0; i < this.m_iNumTiles; i++) {
-      if (this.m_Tiles[i].flags & (handtile_flags.HT_LOCKED | handtile_flags.HT_TOCHOW)) continue
-
-      let tmp = this.clone()
-      if (tmp.Pung(this.m_Tiles[i].tile, false)) {
-        if (tmp.IsReady()) return true
-      }
-
-      tmp = this.clone()
-      if (tmp.Chow(this.m_Tiles[i].tile, chow_location.CHOW_LOWER, false)) {
-        if (tmp.IsReady()) return true
-      }
-
-      t[concealed++] = this.m_Tiles[i].tile.clone()
-    }
-
-    if (concealed === 1) {
-      return true
-    } else if (concealed === 4) {
-      let m = 0
-      let n = 0
-      let foundPair = false
-      for (m = 0; m < 4; m++) {
-        for (n = m + 1; n < 4; n++) {
-          if (t[m].equals(t[n])) {
-            foundPair = true
-            break
-          }
-        }
-        if (foundPair) break
-      }
-      if (!foundPair) return false
-
-      const other: number[] = []
-      for (let i = 0; i < 4; i++) {
-        if (i !== m && i !== n) other.push(i)
-      }
-      if (t[other[0]].GetSuit() !== t[other[1]].GetSuit()) return false
-      const d = Math.abs(t[other[0]].GetValue() - t[other[1]].GetValue())
-      if (d === 0) return true
-      if (t[other[0]].GetSuit() & (TileSuit.TILESUIT_WIND | TileSuit.TILESUIT_DRAGON)) return false
-      return d >= 0 && d < 3
-    }
-
-    if (this.IsThirteenWondersReady()) return true
-    if (this.IsSevenPairsReady()) return true
-    return false
+    const dummy: CTile[] = []
+    return this.GetWaitingTile(dummy, 1) > 0
   }
 
-  IsThirteenWondersReady(): boolean {
-    let havetwo = false
-    for (let j = 0; j < this.m_iNumTiles; j++) {
-      if (!this.m_Tiles[j].tile.IsMajor()) return false
-    }
-    for (let i = 0; i < 13; i++) {
-      let count = 0
-      const target = new CTile(TTW_CODES[i])
-      for (let j = 0; j < this.m_iNumTiles; j++) {
-        if (this.m_Tiles[j].tile.equals(target)) count++
+  GetWaitingTile(tiles: CTile[], max: number = 34): number {
+    let found = 0
+    for (let k = 0; k < ALL_34_TILE_CODES.length; k++) {
+      if (found >= max) break
+      const candidate = new CTile(ALL_34_TILE_CODES[k])
+      // Do not treat 5th copy as a valid wait if player already holds all 4 copies concealed
+      let concealedCopies = 0
+      for (let i = 0; i < this.m_iNumTiles; i++) {
+        if (this.m_Tiles[i].flags & handtile_flags.HT_OPEN) continue
+        if (this.m_Tiles[i].tile.equals(candidate)) concealedCopies++
       }
-      if (count > 2) return false
-      else if (count === 2) {
-        if (havetwo) return false
-        havetwo = true
-      }
-    }
-    return true
-  }
-
-  IsSevenPairsReady(): boolean {
-    if (this.m_iNumTiles <= 1) return true
-    if (this.m_iNumTileSets > 0) return false
-
-    let tmp = this.clone()
-    let t = this.m_Tiles[0].tile.clone()
-    tmp.RemoveTileByTile(t)
-    if (tmp.RemoveTileByTile(t)) {
-      if (tmp.RemoveTileByTile(t)) return false
-    } else {
-      t = this.m_Tiles[1].tile.clone()
-      tmp = this.clone()
-      tmp.RemoveTileByTile(t)
-      if (tmp.RemoveTileByTile(t)) {
-        if (tmp.RemoveTileByTile(t)) return false
-      } else {
-        return false
+      if (concealedCopies >= 4) continue
+      if (this.CanMahjong(candidate)) {
+        tiles[found++] = candidate
       }
     }
-    return tmp.IsSevenPairsReady()
-  }
-
-  GetWaitingTile(tiles: CTile[], max: number = 13): number {
-    const state = { current: 0 }
-    return this.GetWaitingTile_real(tiles, max, state)
-  }
-
-  private addWaitingUnique(tiles: CTile[], max: number, state: { current: number }, tile: CTile): void {
-    for (let j = 0; j < state.current; j++) {
-      if (tiles[j].equals(tile)) return
-    }
-    if (state.current < max) {
-      tiles[state.current++] = tile.clone()
-    }
-  }
-
-  private GetWaitingTile_real(tiles: CTile[], max: number, state: { current: number }): number {
-    let concealed = 0
-    const t: CTile[] = []
-
-    for (let i = 0; i < this.m_iNumTiles; i++) {
-      if (this.m_Tiles[i].flags & (handtile_flags.HT_LOCKED | handtile_flags.HT_TOCHOW)) continue
-
-      let tmp = this.clone()
-      if (tmp.Pung(this.m_Tiles[i].tile, false)) {
-        tmp.GetWaitingTile_real(tiles, max, state)
-      }
-
-      tmp = this.clone()
-      if (tmp.Chow(this.m_Tiles[i].tile, chow_location.CHOW_LOWER, false)) {
-        tmp.GetWaitingTile_real(tiles, max, state)
-      }
-
-      t[concealed++] = this.m_Tiles[i].tile.clone()
-    }
-
-    if (concealed === 1) {
-      this.addWaitingUnique(tiles, max, state, t[0])
-    } else if (concealed === 4) {
-      let m = 0
-      let n = 0
-      let foundPair = false
-      for (m = 0; m < 4; m++) {
-        for (n = m + 1; n < 4; n++) {
-          if (t[m].equals(t[n])) {
-            foundPair = true
-            break
-          }
-        }
-        if (foundPair) break
-      }
-      if (foundPair) {
-        const other: number[] = []
-        for (let i = 0; i < 4; i++) {
-          if (i !== m && i !== n) other.push(i)
-        }
-        if (t[other[0]].GetSuit() === t[other[1]].GetSuit()) {
-          if (t[other[0]].GetValue() > t[other[1]].GetValue()) {
-            const temp = other[0]
-            other[0] = other[1]
-            other[1] = temp
-          }
-          const d = t[other[1]].GetValue() - t[other[0]].GetValue()
-          if (d === 0) {
-            this.addWaitingUnique(tiles, max, state, t[other[0]])
-          } else if (d === 1) {
-            if ((t[other[0]].GetSuit() & (TileSuit.TILESUIT_WIND | TileSuit.TILESUIT_DRAGON)) === 0) {
-              if (t[other[0]].GetValue() > 1) {
-                this.addWaitingUnique(tiles, max, state, new CTile(t[other[0]].GetKind() - 1))
-              }
-              if (t[other[1]].GetValue() < 9) {
-                this.addWaitingUnique(tiles, max, state, new CTile(t[other[1]].GetKind() + 1))
-              }
-            }
-          } else if (d === 2) {
-            if ((t[other[0]].GetSuit() & (TileSuit.TILESUIT_WIND | TileSuit.TILESUIT_DRAGON)) === 0) {
-              this.addWaitingUnique(tiles, max, state, new CTile(t[other[0]].GetKind() + 1))
-            }
-          }
-        }
-      }
-    }
-
-    if (state.current <= 0) {
-      this.GetThirteenWondersWaitingTile(tiles, max, state)
-    }
-    if (state.current <= 0) {
-      this.GetSevenPairsWaitingTile(tiles, max, state)
-    }
-    return state.current
-  }
-
-  private GetThirteenWondersWaitingTile(tiles: CTile[], max: number, state: { current: number }): number {
-    let zero = -1
-    let havetwo = false
-    for (let i = 0; i < this.m_iNumTiles; i++) {
-      if (!this.m_Tiles[i].tile.IsMajor()) return state.current
-    }
-    for (let i = 0; i < 13; i++) {
-      let count = 0
-      const target = new CTile(TTW_CODES[i])
-      for (let j = 0; j < this.m_iNumTiles; j++) {
-        if (this.m_Tiles[j].tile.equals(target)) count++
-      }
-      if (count > 2) return state.current
-      else if (count === 2) {
-        if (havetwo) return state.current
-        havetwo = true
-      } else if (count === 0) {
-        zero = i
-      }
-    }
-    if (!havetwo) {
-      for (let i = 0; i < 13; i++) {
-        if (state.current < max) tiles[state.current++] = new CTile(TTW_CODES[i])
-      }
-    } else if (zero !== -1) {
-      if (state.current < max) tiles[state.current++] = new CTile(TTW_CODES[zero])
-    }
-    return state.current
-  }
-
-  private GetSevenPairsWaitingTile(tiles: CTile[], max: number, state: { current: number }): number {
-    if (this.m_iNumTiles < 1) return state.current
-    if (this.m_iNumTiles === 1) {
-      if (state.current < max) tiles[state.current++] = this.m_Tiles[0].tile.clone()
-      return state.current
-    }
-    if (this.m_iNumTileSets > 0) return state.current
-
-    let tmp = this.clone()
-    let t = this.m_Tiles[0].tile.clone()
-    tmp.RemoveTileByTile(t)
-    if (tmp.RemoveTileByTile(t)) {
-      if (tmp.RemoveTileByTile(t)) return state.current
-    } else {
-      t = this.m_Tiles[1].tile.clone()
-      tmp = this.clone()
-      tmp.RemoveTileByTile(t)
-      if (tmp.RemoveTileByTile(t)) {
-        if (tmp.RemoveTileByTile(t)) return state.current
-      } else {
-        return state.current
-      }
-    }
-    return tmp.GetSevenPairsWaitingTile(tiles, max, state)
+    return found
   }
 
   IsConcealed(): boolean {

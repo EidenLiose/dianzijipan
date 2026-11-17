@@ -1,6 +1,8 @@
 // PVP Room Synchronization (Public Internet WSS + LAN SSE + BroadcastChannel)
 // & WebRTC P2P Voice Chat Manager (Supports 2P Arcade Duel & 4P Four-Player Mahjong)
 
+export const CLIENT_PROTOCOL_VERSION = '4.1.0'
+
 export interface PvpPeerInfo {
   peerId: string
   name: string
@@ -284,6 +286,7 @@ export class PvpManager {
   private bc: BroadcastChannel | null = null
   private publicSignaling: PublicWssSignaling
   private seenMsgIds = new Set<string>()
+  private lastServerSeq: number = 0
   private presenceTimer: any = null
 
   private pcs = new Map<string, RTCPeerConnection>()
@@ -304,6 +307,7 @@ export class PvpManager {
   public onChatEmote?: (senderName: string, text: string) => void
   public onOpponentDonden?: (seatIndex?: number) => void
   public onPublicStatusChange?: (connected: boolean, text: string) => void
+  public onVersionMismatch?: (serverVer: string) => void
 
   constructor() {
     this.initPersistentIdentity()
@@ -380,6 +384,7 @@ export class PvpManager {
     if (this.roomId === roomId && (this.es || this.bc)) return
     this.leaveRoom()
     this.roomId = roomId
+    this.lastServerSeq = 0
     this.peers = [
       {
         peerId: this.peerId,
@@ -494,6 +499,8 @@ export class PvpManager {
       msgId,
       roomId: this.roomId,
       senderId: this.peerId,
+      clientVersion: CLIENT_PROTOCOL_VERSION,
+      sinceSeq: this.lastServerSeq,
     }
     this.seenMsgIds.add(msgId)
 
@@ -516,9 +523,20 @@ export class PvpManager {
       })
       if (resp.ok) {
         const json = await resp.json().catch(() => null)
-        if (json && Array.isArray(json.events)) {
-          for (const ev of json.events) {
-            this.handleIncomingMessage(ev)
+        if (json) {
+          if (json.serverVersion && json.serverVersion !== CLIENT_PROTOCOL_VERSION) {
+            this.onVersionMismatch?.(json.serverVersion)
+          }
+          if (typeof json.latestSeq === 'number' && json.latestSeq > this.lastServerSeq) {
+            this.lastServerSeq = json.latestSeq
+          }
+          if (Array.isArray(json.events)) {
+            for (const ev of json.events) {
+              if (typeof ev.seq === 'number' && ev.seq > this.lastServerSeq) {
+                this.lastServerSeq = ev.seq
+              }
+              this.handleIncomingMessage(ev)
+            }
           }
         }
       }
@@ -898,25 +916,31 @@ export class PvpManager {
         }
       }
       if (expectedPhase && next.phase !== 'TIMEOUT' && next.phase !== expectedPhase) {
-        // If we are waiting for DISCARD, discard any leftover duplicate DRAW packet
-        if (expectedPhase === 'DISCARD' && next.phase === 'DRAW' && next.act !== 3 && next.act !== 6) {
+        // If we are waiting for DISCARD, discard any leftover duplicate DRAW packet (unless Ron act === 3)
+        if (expectedPhase === 'DISCARD' && next.phase === 'DRAW' && next.act !== 3) {
           this.moveQueue.splice(i, 1)
           i--
           continue
         }
-        // If we are waiting for DRAW and a DISCARD packet arrived ahead of DRAW, synthesize DRAW from prevDraw!
-        if (expectedPhase === 'DRAW' && next.phase === 'DISCARD' && next.prevDraw) {
+        // If we are waiting for DRAW and a DISCARD packet arrived ahead of DRAW (with or without prevDraw),
+        // ALWAYS synthesize DRAW once and keep DISCARD in queue for AS_DISCARD! NEVER pass DISCARD into AS_DRAW!
+        if (expectedPhase === 'DRAW' && next.phase === 'DISCARD') {
+          if ((next as any)._drawSynthesized) {
+            continue
+          }
           const synthDraw: PvpMovePacket = {
             round: next.round,
             phase: 'DRAW',
-            act: next.prevDraw.act,
-            tileCode: next.prevDraw.tileCode,
-            chowLocation: next.prevDraw.chowLocation,
+            act: next.prevDraw?.act ?? 1,
+            tileCode: next.prevDraw?.tileCode,
+            chowLocation: next.prevDraw?.chowLocation,
           }
-          delete next.prevDraw // Ensure we only synthesize once, keeping DISCARD in queue for AS_DISCARD!
+          ;(next as any)._drawSynthesized = true
+          delete next.prevDraw
           this.onTurnCountdown?.(0, false)
           return Promise.resolve(synthDraw)
         }
+        continue
       }
       this.moveQueue.splice(i, 1)
       this.onTurnCountdown?.(0, false)
@@ -963,19 +987,20 @@ export class PvpManager {
         }
         if (expectedPhase && move.phase !== expectedPhase) {
           // If waiting for DISCARD and a late duplicate DRAW arrives, ignore the duplicate DRAW
-          if (expectedPhase === 'DISCARD' && move.phase === 'DRAW' && move.act !== 3 && move.act !== 6) {
+          if (expectedPhase === 'DISCARD' && move.phase === 'DRAW' && move.act !== 3) {
             this.moveResolvers.unshift(wrappedResolve)
             return
           }
-          // If waiting for DRAW and DISCARD arrives first, synthesize DRAW from prevDraw and queue DISCARD!
-          if (expectedPhase === 'DRAW' && move.phase === 'DISCARD' && move.prevDraw) {
+          // If waiting for DRAW and DISCARD arrives first (with or without prevDraw), synthesize DRAW and queue DISCARD!
+          if (expectedPhase === 'DRAW' && move.phase === 'DISCARD') {
             const synthDraw: PvpMovePacket = {
               round: move.round,
               phase: 'DRAW',
-              act: move.prevDraw.act,
-              tileCode: move.prevDraw.tileCode,
-              chowLocation: move.prevDraw.chowLocation,
+              act: move.prevDraw?.act ?? 1,
+              tileCode: move.prevDraw?.tileCode,
+              chowLocation: move.prevDraw?.chowLocation,
             }
+            ;(move as any)._drawSynthesized = true
             delete move.prevDraw
             this.moveQueue.push(move)
             clearTimeout(timeoutId)
@@ -984,6 +1009,9 @@ export class PvpManager {
             resolve(synthDraw)
             return
           }
+          this.moveQueue.push(move)
+          this.moveResolvers.unshift(wrappedResolve)
+          return
         }
         clearTimeout(timeoutId)
         clearInterval(tickTimer)

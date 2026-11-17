@@ -259,6 +259,14 @@ export class CGeneral {
     }
   }
 
+  abortAllKeys(): void {
+    this.hasActivePrompt = false
+    while (this.keyResolvers.length > 0) {
+      const r = this.keyResolvers.shift()!
+      r('__ABORT_ROUND__')
+    }
+  }
+
   handleCanvasMouseDown(x: number, y: number, button: number): void {
     if (button === 2) {
       this.pushKey('ArrowRight')

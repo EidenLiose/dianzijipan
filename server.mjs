@@ -14,6 +14,7 @@ const DATA_DIR = path.join(__dirname, 'data')
 const LEADERBOARD_FILE = path.join(DATA_DIR, 'leaderboard.json')
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || 'mj.eduready.ai'
+const APP_VERSION = '4.1.0'
 
 // In-memory room registry
 const rooms = new Map()
@@ -83,6 +84,8 @@ function getOrCreateRoom(roomId) {
       activeMatch: null,
       moves: [],
       recentEvents: [],
+      eventSeq: 0,
+      staleWarnedPeers: new Set(),
       createdAt: Date.now(),
       cleanupTimer: null,
     })
@@ -114,10 +117,11 @@ function broadcastToRoom(roomId, msg, excludePeerId) {
   if (
     msg &&
     msg.msgId &&
-    ['START_PVP_MATCH', 'PVP_MOVE', 'CHAT_EMOTE', 'VOICE_AUDIO_CHUNK', 'UPDATE_META', 'BC_HELLO', 'BC_HELLO_ACK'].includes(
+    ['START_PVP_MATCH', 'PVP_MOVE', 'CHAT_EMOTE', 'UPDATE_META', 'BC_HELLO', 'BC_HELLO_ACK'].includes(
       msg.type
     )
   ) {
+    msg.seq = ++rm.eventSeq
     rm.recentEvents.push(msg)
     if (rm.recentEvents.length > 80) {
       rm.recentEvents.splice(0, rm.recentEvents.length - 80)
@@ -225,6 +229,7 @@ const server = http.createServer((req, res) => {
     })
     res.end(
       JSON.stringify({
+        serverVersion: APP_VERSION,
         domain: PUBLIC_DOMAIN,
         serverIp: '173.231.53.226',
         lanIps: getLanIps(),
@@ -434,6 +439,19 @@ const server = http.createServer((req, res) => {
           rm.moves.push(data.move)
         }
 
+        // Warn once if an un-refreshed legacy browser tab is still connected to this room
+        if (rm && senderId && !data.clientVersion && !rm.staleWarnedPeers.has(senderId)) {
+          rm.staleWarnedPeers.add(senderId)
+          broadcastToRoom(roomId, {
+            msgId: 'sys_ver_' + Date.now(),
+            type: 'CHAT_EMOTE',
+            roomId,
+            senderId: 'SYSTEM',
+            senderName: '系统提示',
+            text: '检测到房间内有未刷新的旧版网页，请双方按 F5 刷新同步至最新版，避免卡牌！',
+          })
+        }
+
         if (data.type === 'UPDATE_META') {
           const p = rm?.peers.get(senderId)
           if (p) {
@@ -451,6 +469,7 @@ const server = http.createServer((req, res) => {
         } else {
           broadcastToRoom(roomId, data, senderId)
         }
+        const sinceSeq = typeof data.sinceSeq === 'number' ? data.sinceSeq : 0
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
@@ -458,7 +477,9 @@ const server = http.createServer((req, res) => {
         res.end(
           JSON.stringify({
             ok: true,
-            events: rm.recentEvents.filter((e) => e.senderId !== senderId).slice(-25),
+            serverVersion: APP_VERSION,
+            latestSeq: rm.eventSeq,
+            events: rm.recentEvents.filter((e) => e.senderId !== senderId && (e.seq || 0) > sinceSeq).slice(-25),
           })
         )
       } catch {
@@ -491,7 +512,7 @@ const server = http.createServer((req, res) => {
     const ext = path.extname(filePath).toLowerCase()
     const contentType = MIME_TYPES[ext] || 'application/octet-stream'
     const cacheControl =
-      ext === '.html' ? 'no-cache' : 'public, max-age=86400'
+      ext === '.html' ? 'no-store, no-cache, must-revalidate' : 'public, max-age=86400'
     const acceptEncoding = req.headers['accept-encoding'] || ''
     const compressible = ['.html', '.js', '.mjs', '.css', '.json', '.ttf', '.svg', '.txt', '.ini'].includes(ext)
 

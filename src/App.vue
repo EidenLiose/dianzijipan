@@ -257,6 +257,7 @@
             @pointerdown="onCanvasPointerDown"
             @pointermove="onCanvasPointerMove"
             @pointerup="onCanvasPointerUp"
+            @pointercancel="pointerDownPos = null"
           ></canvas>
 
           <!-- Portrait Mobile Landscape Suggestion Pill -->
@@ -299,6 +300,14 @@
               title="打开快捷语音喊话与真人对讲菜单"
             >
               💬 喊话
+            </button>
+            <button
+              v-if="isPvpMode"
+              class="fs-pill-btn"
+              @click.stop="startPvpImmediately"
+              title="双端重新同步发牌开新局"
+            >
+              🔄 重发牌
             </button>
             <button
               v-if="isPortraitNarrow || isRotatedLandscape"
@@ -996,7 +1005,7 @@ import { CGeneral, SoundId, TILE_WIDTH } from './weimzh/general'
 import { CGame, playeraction, type WaitingTileHint } from './weimzh/player'
 import { CTile } from './weimzh/tile'
 import { handtile_flags } from './weimzh/hand'
-import { PvpManager, type PvpPeerInfo } from './weimzh/pvpManager'
+import { PvpManager, CLIENT_PROTOCOL_VERSION, type PvpPeerInfo } from './weimzh/pvpManager'
 
 interface PublicRoomSummary {
   roomId: string
@@ -1025,7 +1034,7 @@ const crtEnabled = ref(false) // Default crisp HD commercial look; user can togg
 const musicOn = ref(true)
 const soundOn = ref(true)
 const twVoiceOn = ref(true)
-const confirmDiscardMode = ref(true) // Commercial anti-misclick: 1st tap selects & shows Tenpai, 2nd tap discards
+const confirmDiscardMode = ref(false) // Default OFF: single-click instant discard (optional 2-tap anti-misclick in Settings)
 const toastText = ref('')
 const chatBubbleText = ref('')
 
@@ -1215,7 +1224,7 @@ const loadCareer = () => {
       if (typeof parsed.reliefDate === 'string') career.reliefDate = parsed.reliefDate
       if (typeof parsed.reliefCount === 'number') career.reliefCount = parsed.reliefCount
     }
-    const savedConfirm = window.localStorage.getItem('weimzh_confirm_discard')
+    const savedConfirm = window.localStorage.getItem('weimzh_confirm_discard_v2')
     if (savedConfirm !== null) {
       confirmDiscardMode.value = savedConfirm === '1'
     }
@@ -1251,17 +1260,30 @@ const reportLeaderboard = async (bigWinNotice?: string) => {
   } catch {}
 }
 
+let reloadScheduled = false
+const handleServerVersionCheck = (srvVer?: string) => {
+  if (!srvVer || srvVer === CLIENT_PROTOCOL_VERSION || reloadScheduled) return
+  reloadScheduled = true
+  showToast('🔄 检测到新版本更新，正在为您自动刷新同步...')
+  setTimeout(() => {
+    window.location.reload()
+  }, 800)
+}
+
 const refreshPublicLobby = async () => {
   try {
     const resp = await fetch('/api/room/list')
     if (resp.ok) {
       const data = await resp.json()
+      if (data.serverVersion && !isPvpMode.value) {
+        handleServerVersionCheck(data.serverVersion)
+      }
       if (typeof data.onlinePlayers === 'number') onlinePlayersCount.value = data.onlinePlayers
       if (Array.isArray(data.rooms)) publicRooms.value = data.rooms
       if (Array.isArray(data.notices) && data.notices.length > 0) {
         serverNotices.value = [
           ...data.notices,
-          '💡 提示：手牌上方带有绿色圆点的牌代表打出后即可听牌，单击即可查看胡哪几张及剩余张数！',
+          '💡 提示：手牌上方带有绿色圆点的牌代表打出后即可听牌，鼠标悬停即可查看待胡牌张与余数！',
         ]
       }
     }
@@ -1362,16 +1384,19 @@ const syncUIState = () => {
   reachBonusActive.value = game.m_fReachBonus
 
   const st = game.m_pPlayer.currentActionState
+  const myTurnDiscard = game.m_pPlayer.isMyTurnToDiscard
+  const myTurnRespond = game.m_pPlayer.isMyTurnToRespond
+  const canAct = myTurnDiscard || myTurnRespond
   currentActionState.value = st
   hasActivePrompt.value = Boolean(general?.hasActivePrompt)
-  validActions.chow = game.m_pPlayer.ActionIsValid(st, playeraction.PA_CHOW)
-  validActions.pung = game.m_pPlayer.ActionIsValid(st, playeraction.PA_PUNG)
-  validActions.kong = game.m_pPlayer.ActionIsValid(st, playeraction.PA_KONG)
-  validActions.reach = game.m_pPlayer.ActionIsValid(st, playeraction.PA_REACH)
-  validActions.mahjong = game.m_pPlayer.ActionIsValid(st, playeraction.PA_MAHJONG)
+  validActions.chow = canAct && game.m_pPlayer.ActionIsValid(st, playeraction.PA_CHOW)
+  validActions.pung = canAct && game.m_pPlayer.ActionIsValid(st, playeraction.PA_PUNG)
+  validActions.kong = canAct && game.m_pPlayer.ActionIsValid(st, playeraction.PA_KONG)
+  validActions.reach = myTurnDiscard && game.m_pPlayer.ActionIsValid(st, playeraction.PA_REACH)
+  validActions.mahjong = canAct && game.m_pPlayer.ActionIsValid(st, playeraction.PA_MAHJONG)
 
   // Update commercial Tenpai helper states
-  if (st === 1) {
+  if (myTurnDiscard) {
     discardTenpaiMap.value = game.m_pPlayer.getDiscardTenpaiMap()
     myWaitingTiles.value = []
   } else {
@@ -1390,7 +1415,7 @@ const unlockAudio = () => {
 const toggleConfirmDiscardMode = () => {
   confirmDiscardMode.value = !confirmDiscardMode.value
   try {
-    window.localStorage.setItem('weimzh_confirm_discard', confirmDiscardMode.value ? '1' : '0')
+    window.localStorage.setItem('weimzh_confirm_discard_v2', confirmDiscardMode.value ? '1' : '0')
   } catch {}
   if (game && !confirmDiscardMode.value) {
     game.m_pPlayer.selectedTileLetter = ''
@@ -1459,7 +1484,12 @@ const selectOrDiscardLetter = (letter: string) => {
 }
 
 const onDeckKeyClick = (letter: string) => {
-  selectOrDiscardLetter(letter)
+  // Bottom physical keyboard [A]~[N] ALWAYS discards / draws in a single click!
+  unlockAudio()
+  if (!general || !game) return
+  game.m_pPlayer.selectedTileLetter = ''
+  selectedTileLetter.value = ''
+  general.pushKey(letter.toLowerCase())
 }
 
 const triggerPlayerAction = (act: playeraction) => {
@@ -1971,16 +2001,24 @@ onMounted(async () => {
     }
   }
 
-  pvp.onRoomSync = ({ match, moves }) => {
+  pvp.onVersionMismatch = (srvVer) => {
+    if (!isPvpMode.value) {
+      handleServerVersionCheck(srvVer)
+    }
+  }
+
+  pvp.onRoomSync = ({ match }) => {
     showInviteModal.value = false
-    showPvpHandoverBanner.value = false
     pvpGameMode.value = match.gameMode || '2P'
     allowDonden.value = Boolean(match.allowDonden)
     betAmount.value = match.betAmount || 50
-    if (game && !game.isPvpMode) {
-      game.startPvpMatchNow(match, moves)
-      showToast(`🔄 已自动重连恢复至房间 #${roomId.value} 当前牌局！`)
-    }
+    // Re-deal cleanly across all connected peers so both sides align on Round 1 without stale move desync!
+    setTimeout(() => {
+      if (pvp.peers.length >= 2 && !isPvpMode.value) {
+        pvp.requestStartPvpMatch()
+        showToast(`🔄 已重连房间 #${roomId.value} 并自动同步新牌局！`)
+      }
+    }, 650)
   }
 
   pvp.onOpponentDonden = () => {
