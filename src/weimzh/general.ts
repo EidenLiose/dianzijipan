@@ -297,6 +297,35 @@ export class CGeneral {
     })
   }
 
+  ReadKeyWithTimeout(timeoutMs: number, onTick?: (secLeft: number) => void): Promise<string> {
+    return new Promise((resolve) => {
+      let secLeft = Math.ceil(timeoutMs / 1000)
+      onTick?.(secLeft)
+
+      const tickTimer = setInterval(() => {
+        secLeft = Math.max(0, secLeft - 1)
+        onTick?.(secLeft)
+      }, 1000)
+
+      let wrappedResolve: (key: string) => void
+      const timeoutId = setTimeout(() => {
+        clearInterval(tickTimer)
+        onTick?.(0)
+        const idx = this.keyResolvers.indexOf(wrappedResolve)
+        if (idx >= 0) this.keyResolvers.splice(idx, 1)
+        resolve('__TIMEOUT__')
+      }, timeoutMs)
+
+      wrappedResolve = (key: string) => {
+        clearTimeout(timeoutId)
+        clearInterval(tickTimer)
+        onTick?.(0)
+        resolve(key)
+      }
+      this.keyResolvers.push(wrappedResolve)
+    })
+  }
+
   async WaitForAnyKey(): Promise<void> {
     await this.ReadKey()
   }

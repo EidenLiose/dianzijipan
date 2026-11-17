@@ -1066,6 +1066,51 @@ export abstract class CBasePlayer {
     }
     return loc
   }
+
+  public pickBestDiscardIndexPublic(): number {
+    if (this.m_fReach) {
+      for (let i = this.m_Hand.m_iNumTiles - 1; i >= 0; i--) {
+        if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_JUSTGOT) return i
+      }
+      return this.m_Hand.m_iNumTiles - 1
+    }
+
+    let minScore = 999999
+    let bestIdx = this.m_Hand.m_iNumTiles - 1
+
+    for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
+      if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_LOCKED) continue
+      const t = this.m_Hand.m_Tiles[i].tile
+      let score = 0
+      for (let j = 0; j < this.m_Hand.m_iNumTiles; j++) {
+        if (i === j) continue
+        const o = this.m_Hand.m_Tiles[j].tile
+        if (o.equals(t)) score += 300
+        else if (
+          o.GetSuit() === t.GetSuit() &&
+          !(t.GetSuit() & (TileSuit.TILESUIT_WIND | TileSuit.TILESUIT_DRAGON))
+        ) {
+          const diff = Math.abs(o.GetValue() - t.GetValue())
+          if (diff === 1) score += 180
+          else if (diff === 2) score += 90
+        }
+      }
+      if (!t.IsMajor()) score += 25
+      if (this.gpGame.IsDora(t)) score += 150
+
+      const testHand = this.m_Hand.clone()
+      testHand.RemoveTile(i)
+      if (testHand.IsReady()) {
+        return i
+      }
+
+      if (score < minScore) {
+        minScore = score
+        bestIdx = i
+      }
+    }
+    return bestIdx
+  }
 }
 
 function playerDrawLoc(l: number): number {
@@ -1402,8 +1447,30 @@ export class CPlayer extends CBasePlayer {
       ) {
         await this.gpGeneral.UTIL_Delay(260)
         key = 'n'
+      } else if (this.gpGame.isAutoPlay) {
+        await this.gpGeneral.UTIL_Delay(320)
+        if (this.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_MAHJONG)) {
+          act = playeraction.PA_MAHJONG
+          key = 'Enter'
+        } else {
+          key = 'n'
+        }
       } else {
-        key = await this.gpGeneral.ReadKey()
+        key = await this.gpGeneral.ReadKeyWithTimeout(15000, (sec) => {
+          this.gpGame.turnCountdown = sec
+          this.gpGame.isWaitingOpponentTurn = false
+          this.gpGame.notifyUI()
+        })
+        if (key === '__TIMEOUT__') {
+          this.gpGame.isAutoPlay = true
+          this.gpGame.onAutoPlayTriggered?.('⏱️ 15秒响应超时，已自动为您开启电脑 AI 托管！')
+          if (this.ActionIsValid(actionstate.AS_DRAW, playeraction.PA_MAHJONG)) {
+            act = playeraction.PA_MAHJONG
+            key = 'Enter'
+          } else {
+            key = 'n'
+          }
+        }
       }
 
       if (key === '__ABORT_ROUND__') {
@@ -1548,8 +1615,27 @@ export class CPlayer extends CBasePlayer {
       ) {
         await this.gpGeneral.UTIL_Delay(450)
         key = 'n'
+      } else if (this.gpGame.isAutoPlay) {
+        await this.gpGeneral.UTIL_Delay(380)
+        if (this.ActionIsValid(actionstate.AS_DISCARD, playeraction.PA_MAHJONG)) {
+          act = playeraction.PA_MAHJONG
+          key = 'Enter'
+        } else {
+          const bestIdx = this.pickBestDiscardIndexPublic()
+          const loc = this.IndexToLoc(bestIdx)
+          key = loc >= 0 && loc <= 12 ? String.fromCharCode(97 + loc) : 'n'
+        }
       } else {
-        key = await this.gpGeneral.ReadKey()
+        key = await this.gpGeneral.ReadKeyWithTimeout(15000, (sec) => {
+          this.gpGame.turnCountdown = sec
+          this.gpGame.isWaitingOpponentTurn = false
+          this.gpGame.notifyUI()
+        })
+        if (key === '__TIMEOUT__') {
+          this.gpGame.isAutoPlay = true
+          this.gpGame.onAutoPlayTriggered?.('⏱️ 15秒出牌超时，已自动为您开启电脑 AI 托管！')
+          continue
+        }
       }
 
       if (key === '__ABORT_ROUND__') {
@@ -1823,10 +1909,14 @@ export class CBot extends CBasePlayer {
 
   async Action(state: actionstate): Promise<playeraction> {
     if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-      const move = await this.gpGame.pvpManager.waitForOpponentMove()
+      const move = await this.gpGame.pvpManager.waitForOpponentMove(18000)
       if (this.gpGame.abortCurrentRound) return playeraction.PA_NONE
 
-      if (state === actionstate.AS_DRAW) {
+      if (move.phase === 'TIMEOUT') {
+        this.gpGame.switchToAiTakeover()
+        this.gpGame.onAutoPlayTriggered?.('⚠️ 对手超时未操作或已掉线，已自动由电脑 AI 托管接管继续牌局！')
+        // Fall through immediately to AI Bot logic below!
+      } else if (state === actionstate.AS_DRAW) {
         if (move.act === playeraction.PA_DRAW) {
           if (this.IsRoundDraw()) return playeraction.PA_NONE
           for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
@@ -2071,7 +2161,26 @@ export class CGame {
   public activeTurnSeat: number = 0
   public abortCurrentRound: boolean = false
 
+  // AI Auto-Play & Turn Countdown State
+  public isAutoPlay: boolean = false
+  public turnCountdown: number = 0
+  public isWaitingOpponentTurn: boolean = false
+  public onAutoPlayTriggered?: (reason: string) => void
+
   public onUIUpdate?: () => void
+
+  toggleAutoPlay(): boolean {
+    this.isAutoPlay = !this.isAutoPlay
+    if (this.isAutoPlay) {
+      // Unblock ReadKeyWithTimeout if currently waiting for player's action!
+      const bestIdx = this.m_pPlayer.pickBestDiscardIndexPublic()
+      const loc = this.m_pPlayer['IndexToLoc'](bestIdx)
+      const k = loc >= 0 && loc <= 12 ? String.fromCharCode(97 + loc) : 'n'
+      this.gpGeneral.pushKey(k)
+    }
+    this.notifyUI()
+    return this.isAutoPlay
+  }
 
   constructor(general: CGeneral) {
     this.gpGeneral = general
@@ -3231,9 +3340,24 @@ export class CGame {
         discardAct = await this.m_pPlayer.Action(actionstate.AS_DISCARD)
         if (this.abortCurrentRound) return
       } else if (!curSeatObj.isBot && this.pvpManager) {
-        const move = await this.pvpManager.waitForOpponentMove()
+        const move = await this.pvpManager.waitForOpponentMove(18000)
         if (this.abortCurrentRound) return
-        if (move.act === playeraction.PA_MAHJONG) {
+        if (move.phase === 'TIMEOUT') {
+          curSeatObj.isBot = true
+          if (!curSeatObj.name.includes('AI')) curSeatObj.name = `${curSeatObj.name}(AI托管)`
+          this.onAutoPlayTriggered?.(`⚠️ 玩家【${curSeatObj.name}】超时未操作，已由电脑 AI 自动接管继续对局！`)
+          const bestIdx = curPlayer.pickBestDiscardIndexPublic()
+          curPlayer.m_Discarded[curPlayer.m_iNumDiscarded] = {
+            tile: curPlayer.m_Hand.m_Tiles[bestIdx].tile.clone(),
+            flags: 0,
+          }
+          curPlayer.m_iNumDiscarded++
+          curPlayer.m_Hand.RemoveTile(bestIdx)
+          for (let i = 0; i < curPlayer.m_Hand.m_iNumTiles; i++) {
+            curPlayer.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+          }
+          curPlayer.m_Hand.Sort()
+        } else if (move.act === playeraction.PA_MAHJONG) {
           discardAct = playeraction.PA_MAHJONG
         } else if (move.act === playeraction.PA_KONG) {
           const idx = move.index ?? 0

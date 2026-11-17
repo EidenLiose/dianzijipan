@@ -32,7 +32,7 @@ export interface StartMatchPayload {
 
 export interface PvpMovePacket {
   seatIndex?: number
-  phase: 'DRAW' | 'DISCARD' | 'DONDEN' | 'CLAIM'
+  phase: 'DRAW' | 'DISCARD' | 'DONDEN' | 'CLAIM' | 'TIMEOUT'
   act: number
   index?: number
   chowLocation?: number
@@ -523,6 +523,12 @@ export class PvpManager {
         if (this.onRosterUpdate) {
           this.onRosterUpdate(this.peers, data.joinedPeerId)
         }
+        // Trigger WebRTC offer to all other peers in roster
+        for (const p of this.peers) {
+          if (p.peerId !== this.peerId && (this.isHost || this.peerId < p.peerId)) {
+            this.startWebRTCOffer(p.peerId)
+          }
+        }
         break
       }
 
@@ -659,7 +665,15 @@ export class PvpManager {
         if (this.onChatEmote) {
           this.onChatEmote(data.senderName || '雀友', data.text)
         }
+        this.playVoiceAlertTone()
         this.speakText(data.text)
+        break
+      }
+
+      case 'VOICE_AUDIO_CHUNK': {
+        if (this.speakerEnabled && data.audioDataUrl) {
+          this.playRelayedAudioChunk(data.audioDataUrl)
+        }
         break
       }
 
@@ -792,21 +806,74 @@ export class PvpManager {
     })
   }
 
-  waitForOpponentMove(): Promise<PvpMovePacket> {
+  public onTurnCountdown?: (secLeft: number, isWaitingOpponent: boolean) => void
+  private mediaRecorder: MediaRecorder | null = null
+  private voiceRelayInterval: any = null
+  private isWebRtcTrackPlaying: boolean = false
+  private ttsUnlocked: boolean = false
+
+  unlockVoiceAudio(): void {
+    try {
+      if (!this.audioCtx) {
+        const Ctx = window.AudioContext || (window as any).webkitAudioContext
+        if (Ctx) this.audioCtx = new Ctx()
+      }
+      if (this.audioCtx && this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => {})
+      }
+      if (!this.ttsUnlocked && 'speechSynthesis' in window) {
+        this.ttsUnlocked = true
+        const silent = new SpeechSynthesisUtterance('')
+        silent.volume = 0
+        window.speechSynthesis.speak(silent)
+      }
+      for (const audio of this.remoteAudios.values()) {
+        if (audio.paused) audio.play().catch(() => {})
+      }
+    } catch {}
+  }
+
+  waitForOpponentMove(timeoutMs: number = 18000): Promise<PvpMovePacket> {
     if (this.moveQueue.length > 0) {
+      this.onTurnCountdown?.(0, false)
       return Promise.resolve(this.moveQueue.shift()!)
     }
     return new Promise((resolve) => {
-      this.moveResolvers.push(resolve)
+      let secLeft = Math.ceil(timeoutMs / 1000)
+      this.onTurnCountdown?.(secLeft, true)
+
+      const tickTimer = setInterval(() => {
+        secLeft = Math.max(0, secLeft - 1)
+        this.onTurnCountdown?.(secLeft, true)
+      }, 1000)
+
+      let wrappedResolve: (move: PvpMovePacket) => void
+      const timeoutId = setTimeout(() => {
+        clearInterval(tickTimer)
+        this.onTurnCountdown?.(0, false)
+        const idx = this.moveResolvers.indexOf(wrappedResolve)
+        if (idx >= 0) this.moveResolvers.splice(idx, 1)
+        resolve({ phase: 'TIMEOUT', act: -1 })
+      }, timeoutMs)
+
+      wrappedResolve = (move: PvpMovePacket) => {
+        clearTimeout(timeoutId)
+        clearInterval(tickTimer)
+        this.onTurnCountdown?.(0, false)
+        resolve(move)
+      }
+      this.moveResolvers.push(wrappedResolve)
     })
   }
 
   clearMoveQueue(): void {
     this.moveQueue = []
     this.moveResolvers = []
+    this.onTurnCountdown?.(0, false)
   }
 
   sendVoiceEmote(text: string): void {
+    this.unlockVoiceAudio()
     this.sendMessage({
       type: 'CHAT_EMOTE',
       senderName: this.myName,
@@ -815,22 +882,61 @@ export class PvpManager {
     if (this.onChatEmote) {
       this.onChatEmote(this.myName, text)
     }
+    this.playVoiceAlertTone()
     this.speakText(text)
+  }
+
+  private playVoiceAlertTone(): void {
+    if (!this.speakerEnabled) return
+    try {
+      // 1. Play crisp arcade voice attention sound
+      const sfx = new Audio('/weimzh/sound/ding.wav')
+      sfx.volume = 0.85
+      sfx.play().catch(() => {})
+
+      // 2. Synthesize a pleasant 2-note WebAudio walkie-talkie chime (never blocked once AudioContext is resumed)
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext
+      if (!this.audioCtx && Ctx) this.audioCtx = new Ctx()
+      if (this.audioCtx) {
+        if (this.audioCtx.state === 'suspended') this.audioCtx.resume().catch(() => {})
+        const now = this.audioCtx.currentTime
+        const osc = this.audioCtx.createOscillator()
+        const gain = this.audioCtx.createGain()
+        osc.type = 'sine'
+        osc.frequency.setValueAtTime(587.33, now) // D5
+        osc.frequency.setValueAtTime(880, now + 0.09) // A5
+        gain.gain.setValueAtTime(0.18, now)
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25)
+        osc.connect(gain)
+        gain.connect(this.audioCtx.destination)
+        osc.start(now)
+        osc.stop(now + 0.25)
+      }
+    } catch {}
   }
 
   private speakText(text: string): void {
     if (!this.speakerEnabled) return
+    this.remoteSpeaking = true
+    this.onSpeakingChange?.(this.localSpeaking, true)
+    const resetSpeak = setTimeout(() => {
+      this.remoteSpeaking = false
+      this.onSpeakingChange?.(this.localSpeaking, false)
+    }, 2600)
+
     try {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel()
+        window.speechSynthesis.resume()
         const u = new SpeechSynthesisUtterance(text)
         u.lang = 'zh-CN'
-        u.rate = 1.15
-        u.onstart = () => {
-          this.remoteSpeaking = true
-          this.onSpeakingChange?.(this.localSpeaking, true)
-        }
+        u.rate = 1.1
+        u.volume = 1.0
+        const voices = window.speechSynthesis.getVoices()
+        const zhVoice = voices.find((v) => v.lang.includes('zh') || v.lang.includes('CN'))
+        if (zhVoice) u.voice = zhVoice
         u.onend = () => {
+          clearTimeout(resetSpeak)
           this.remoteSpeaking = false
           this.onSpeakingChange?.(this.localSpeaking, false)
         }
@@ -839,8 +945,94 @@ export class PvpManager {
     } catch {}
   }
 
+  private playRelayedAudioChunk(dataUrl: string): void {
+    if (!this.speakerEnabled) return
+    try {
+      const a = new Audio(dataUrl)
+      a.volume = 1.0
+      this.remoteSpeaking = true
+      this.onSpeakingChange?.(this.localSpeaking, true)
+      a.onended = () => {
+        this.remoteSpeaking = false
+        this.onSpeakingChange?.(this.localSpeaking, false)
+      }
+      a.onerror = () => {
+        this.remoteSpeaking = false
+        this.onSpeakingChange?.(this.localSpeaking, false)
+      }
+      a.play().catch(() => {
+        this.remoteSpeaking = false
+        this.onSpeakingChange?.(this.localSpeaking, false)
+      })
+    } catch {}
+  }
+
+  async recordAndSendVoiceClip(durationMs: number = 3200): Promise<boolean> {
+    this.unlockVoiceAudio()
+    if (!this.localStream) {
+      await this.initVoiceChat()
+    }
+    if (!this.localStream || typeof MediaRecorder === 'undefined') return false
+    return new Promise((resolve) => {
+      try {
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : ''
+        const rec = mimeType ? new MediaRecorder(this.localStream!, { mimeType }) : new MediaRecorder(this.localStream!)
+        const chunks: BlobPart[] = []
+        rec.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data)
+        }
+        rec.onstop = () => {
+          this.localSpeaking = false
+          this.onSpeakingChange?.(false, this.remoteSpeaking)
+          if (chunks.length === 0) {
+            resolve(false)
+            return
+          }
+          const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' })
+          const reader = new FileReader()
+          reader.onloadend = () => {
+            if (typeof reader.result === 'string') {
+              this.sendMessage({
+                type: 'VOICE_AUDIO_CHUNK',
+                senderName: this.myName,
+                audioDataUrl: reader.result,
+              })
+              this.sendMessage({
+                type: 'CHAT_EMOTE',
+                senderName: this.myName,
+                text: '🎤 [发送了一条真人语音]',
+              })
+              resolve(true)
+            } else {
+              resolve(false)
+            }
+          }
+          reader.readAsDataURL(blob)
+        }
+        this.localSpeaking = true
+        this.onSpeakingChange?.(true, this.remoteSpeaking)
+        rec.start()
+        setTimeout(() => {
+          if (rec.state === 'recording') {
+            try {
+              rec.stop()
+            } catch {
+              resolve(false)
+            }
+          }
+        }, durationMs)
+      } catch {
+        resolve(false)
+      }
+    })
+  }
+
   // =========================================================
-  // Multi-Peer WebRTC P2P Real-time Voice Chat + Audio Ducking
+  // Multi-Peer WebRTC P2P Real-time Voice Chat + Server Relay Fallback
   // =========================================================
   async initVoiceChat(): Promise<void> {
     try {
@@ -861,14 +1053,76 @@ export class PvpManager {
       })
       this.voiceStatus = this.micEnabled ? '🎙️ 实时语音已开麦' : '🔇 麦克风已静音'
       this.setupAudioAnalyser()
+      this.setupVoiceChunkRelay()
+
+      // Crucial fix: once localStream is acquired, renegotiate / offer to all connected peers in room!
+      for (const p of this.peers) {
+        if (p.peerId !== this.peerId) {
+          this.startWebRTCOffer(p.peerId)
+        }
+      }
     } catch {
-      this.voiceStatus = '🔊 仅收听模式 (未检测到麦克风)'
+      this.voiceStatus = '🔊 仅收听模式 (未授权麦克风)'
     }
   }
 
+  private setupVoiceChunkRelay(): void {
+    if (!this.localStream || typeof MediaRecorder === 'undefined') return
+    try {
+      if (this.voiceRelayInterval) clearInterval(this.voiceRelayInterval)
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : ''
+
+      // Record short 2.2s voice clips when user is actively speaking into microphone
+      this.voiceRelayInterval = setInterval(() => {
+        if (!this.micEnabled || !this.localStream || !this.roomId || this.peers.length < 2) return
+        if (!this.localSpeaking) return
+        if (this.mediaRecorder && this.mediaRecorder.state === 'recording') return
+
+        try {
+          const rec = mimeType ? new MediaRecorder(this.localStream, { mimeType }) : new MediaRecorder(this.localStream)
+          const chunks: BlobPart[] = []
+          rec.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data)
+          }
+          rec.onstop = () => {
+            if (chunks.length === 0) return
+            const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' })
+            if (blob.size < 400 || blob.size > 350000) return
+            const reader = new FileReader()
+            reader.onloadend = () => {
+              if (typeof reader.result === 'string') {
+                this.sendMessage({
+                  type: 'VOICE_AUDIO_CHUNK',
+                  audioDataUrl: reader.result,
+                })
+              }
+            }
+            reader.readAsDataURL(blob)
+          }
+          this.mediaRecorder = rec
+          rec.start()
+          setTimeout(() => {
+            if (rec.state === 'recording') {
+              try {
+                rec.stop()
+              } catch {}
+            }
+          }, 2200)
+        } catch {}
+      }, 600)
+    } catch {}
+  }
+
   toggleMic(): boolean {
+    this.unlockVoiceAudio()
     this.micEnabled = !this.micEnabled
-    if (this.localStream) {
+    if (!this.localStream && this.micEnabled) {
+      this.initVoiceChat()
+    } else if (this.localStream) {
       this.localStream.getAudioTracks().forEach((t) => {
         t.enabled = this.micEnabled
       })
@@ -878,6 +1132,7 @@ export class PvpManager {
   }
 
   toggleSpeaker(): boolean {
+    this.unlockVoiceAudio()
     this.speakerEnabled = !this.speakerEnabled
     for (const audio of this.remoteAudios.values()) {
       audio.muted = !this.speakerEnabled
@@ -894,6 +1149,16 @@ export class PvpManager {
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
       ],
     })
     if (this.localStream) {
@@ -914,14 +1179,22 @@ export class PvpManager {
       if (ev.streams && ev.streams[0]) {
         let audio = this.remoteAudios.get(remotePeerId)
         if (!audio) {
-          audio = new Audio()
+          audio = document.createElement('audio')
           audio.autoplay = true
+          ;(audio as any).playsInline = true
+          audio.style.display = 'none'
+          document.body.appendChild(audio)
           this.remoteAudios.set(remotePeerId, audio)
         }
         audio.srcObject = ev.streams[0]
         audio.muted = !this.speakerEnabled
-        audio.play().catch(() => {})
-        this.voiceStatus = '🟢 P2P 语音通话中'
+        audio
+          .play()
+          .then(() => {
+            this.isWebRtcTrackPlaying = true
+          })
+          .catch(() => {})
+        this.voiceStatus = '🟢 P2P 实时语音通话中'
       }
     }
     this.pcs.set(remotePeerId, pc)
@@ -976,7 +1249,9 @@ export class PvpManager {
   private setupAudioAnalyser(): void {
     if (!this.localStream) return
     try {
-      this.audioCtx = new AudioContext()
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext
+      if (!this.audioCtx && Ctx) this.audioCtx = new Ctx()
+      if (!this.audioCtx) return
       const src = this.audioCtx.createMediaStreamSource(this.localStream)
       const analyser = this.audioCtx.createAnalyser()
       analyser.fftSize = 256
@@ -996,7 +1271,7 @@ export class PvpManager {
         let sum = 0
         for (let i = 0; i < data.length; i++) sum += data[i]
         const avg = sum / data.length
-        const speaking = avg > 18
+        const speaking = avg > 15
         if (speaking !== this.localSpeaking) {
           this.localSpeaking = speaking
           this.onSpeakingChange?.(this.localSpeaking, this.remoteSpeaking)
@@ -1010,11 +1285,22 @@ export class PvpManager {
       clearInterval(this.rmsInterval)
       this.rmsInterval = null
     }
+    if (this.voiceRelayInterval) {
+      clearInterval(this.voiceRelayInterval)
+      this.voiceRelayInterval = null
+    }
     for (const pc of this.pcs.values()) {
       pc.close()
     }
     this.pcs.clear()
+    for (const audio of this.remoteAudios.values()) {
+      try {
+        audio.pause()
+        audio.remove()
+      } catch {}
+    }
     this.remoteAudios.clear()
+    this.isWebRtcTrackPlaying = false
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop())
       this.localStream = null

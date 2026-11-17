@@ -92,6 +92,14 @@
         <button class="sys-btn" :class="{ off: !soundOn }" @click.stop="toggleSound">
           {{ soundOn ? '🔊 音效' : '🔇 音效' }}
         </button>
+        <button
+          class="sys-btn autoplay-top-btn"
+          :class="{ active: isAutoPlay }"
+          @click.stop="toggleAutoPlay"
+          title="开启或关闭电脑 AI 自动托管代打"
+        >
+          {{ isAutoPlay ? '🤖 托管中(取消)' : '🤖 电脑托管' }}
+        </button>
         <button class="sys-btn fullscreen-entry-btn" @click.stop="toggleFullscreen" title="进入沉浸全屏模式，隐藏两侧与上下控制面板">
           {{ isFullscreen ? '✕ 退出全屏' : '⛶ 全屏专注' }}
         </button>
@@ -172,8 +180,16 @@
             </div>
           </div>
 
-          <!-- Quick Voice Taunts / Emotes (with TTS & Audio Ducking) -->
-          <div class="quick-voice-title">💬 快捷语音喊话 (带语音合成):</div>
+          <!-- Real Microphone Walkie-Talkie + Quick Voice Taunts -->
+          <button
+            class="walkie-btn"
+            :class="{ recording: isRecordingVoice }"
+            @click.stop="sendRealVoiceClip"
+          >
+            {{ isRecordingVoice ? '🔴 正在录制真人语音 (3秒)...' : '🎤 点击发送 3 秒真人麦克风语音' }}
+          </button>
+
+          <div class="quick-voice-title">💬 快捷语音喊话 (带音效与语音播报):</div>
           <div class="emote-grid">
             <button
               v-for="(txt, idx) in quickVoiceLines"
@@ -209,6 +225,9 @@
               </div>
             </div>
           </div>
+          <button class="dip-btn gold" style="margin-top: 8px;" @click.stop="handleAiTakeover">
+            🤖 对手掉线/不操作？立即由 AI 接管对手
+          </button>
           <div class="fair-lock-notice">
             🔒 <strong>联网防作弊保护中</strong>：单机改牌/必胡/加分秘技已自动锁定（当前规则：{{
               allowDonden && pvpGameMode === '2P' ? '🎪 允许1次换牌' : '🏆 严禁DONDEN换牌'
@@ -269,8 +288,28 @@
             @pointerup="onCanvasPointerUp"
           ></canvas>
 
+          <!-- Top-Left Live Turn Countdown & Auto-Play Status Badge -->
+          <div v-if="turnCountdown > 0 && !isAutoPlay" class="turn-timer-pill" :class="{ urgent: turnCountdown <= 5 }">
+            ⏱️ {{
+              isWaitingOpponentTurn
+                ? `等待对手操作: ${turnCountdown}s (超时AI自动接管)`
+                : `出牌倒计时: ${turnCountdown}s (超时自动托管)`
+            }}
+          </div>
+          <div v-if="isAutoPlay" class="autoplay-active-banner" @click.stop="toggleAutoPlay">
+            🤖 <strong>电脑 AI 正在为您自动托管代打</strong> · 点击此处恢复手动出牌
+          </div>
+
           <!-- Floating Mini HUD Pill (Always accessible in Fullscreen or Mobile) -->
           <div class="floating-fs-hud">
+            <button
+              class="fs-pill-btn"
+              :class="{ active: isAutoPlay }"
+              @click.stop="toggleAutoPlay"
+              title="开启/关闭电脑自动托管代打"
+            >
+              {{ isAutoPlay ? '🤖 取消托管' : '🤖 托管' }}
+            </button>
             <button v-if="isFullscreen" class="fs-pill-btn exit" @click.stop="toggleFullscreen">
               ✕ 退出全屏
             </button>
@@ -286,6 +325,9 @@
               </button>
               <button class="fs-pill-btn" :class="{ active: micOn }" @click.stop="toggleMic">
                 {{ micOn ? '🎙️' : '🔇' }}
+              </button>
+              <button class="fs-pill-btn" @click.stop="sendRealVoiceClip" title="发送3秒真人语音">
+                🎤语音
               </button>
               <button class="fs-pill-btn" @click.stop="restartMatch" title="重开牌局">
                 🔄
@@ -438,6 +480,13 @@
             </button>
             <button class="act-btn confirm" @click.stop="sendKey('Enter')">
               摸牌 / 确认 [Space/Enter]
+            </button>
+            <button
+              class="act-btn autoplay-panel-btn"
+              :class="{ active: isAutoPlay }"
+              @click.stop="toggleAutoPlay"
+            >
+              {{ isAutoPlay ? '🤖 电脑托管中 [点击恢复手动]' : '🤖 开启电脑 AI 自动托管' }}
             </button>
           </div>
         </div>
@@ -664,6 +713,10 @@ const dondenLeft = ref(8)
 
 // PVP & Voice Reactive State
 const isFullscreen = ref(false)
+const isAutoPlay = ref(false)
+const turnCountdown = ref(0)
+const isWaitingOpponentTurn = ref(false)
+const isRecordingVoice = ref(false)
 const hasActivePrompt = ref(false)
 const currentActionState = ref(0)
 const roomId = ref('')
@@ -776,6 +829,9 @@ const syncUIState = () => {
   opponentChips.value = game.pvpOpponentChips
   mySeatIndex.value = game.mySeatIndex
   activeTurnSeat.value = game.activeTurnSeat
+  isAutoPlay.value = game.isAutoPlay
+  turnCountdown.value = game.turnCountdown
+  isWaitingOpponentTurn.value = game.isWaitingOpponentTurn
 
   if (game.isPvpMode && game.seats4P.length > 0) {
     seatsDisplayList.value = game.seats4P.map((s) => ({
@@ -809,8 +865,33 @@ const syncUIState = () => {
 }
 
 const unlockAudio = () => {
+  pvp.unlockVoiceAudio()
   if (general && general.currentAudio && general.currentAudio.paused && musicOn.value) {
     general.currentAudio.play().catch(() => {})
+  }
+}
+
+const toggleAutoPlay = () => {
+  unlockAudio()
+  if (!game) return
+  const next = game.toggleAutoPlay()
+  isAutoPlay.value = next
+  showToast(next ? '🤖 已开启电脑 AI 自动托管代打！' : '🖐️ 已恢复手动出牌')
+}
+
+const sendRealVoiceClip = async () => {
+  unlockAudio()
+  ensureRoomJoined()
+  if (isRecordingVoice.value) return
+  isRecordingVoice.value = true
+  showToast('🎤 正在录制 3 秒真人语音，请直接对麦克风说话...')
+  const ok = await pvp.recordAndSendVoiceClip(3000)
+  isRecordingVoice.value = false
+  if (ok) {
+    showToast('✅ 真人语音已发送给全房牌友！')
+  } else {
+    showToast('⚠️ 未检测到麦克风权限，已为您发送快捷语音提示')
+    pvp.sendVoiceEmote('快点出牌呀，花儿都谢了！')
   }
 }
 
@@ -1309,12 +1390,25 @@ onMounted(async () => {
     }, 3500)
   }
 
+  pvp.onTurnCountdown = (secLeft, isWaitOpp) => {
+    turnCountdown.value = secLeft
+    isWaitingOpponentTurn.value = isWaitOpp
+    if (game) {
+      game.turnCountdown = secLeft
+      game.isWaitingOpponentTurn = isWaitOpp
+    }
+  }
+
   if (gameCanvas.value) {
     general = new CGeneral(gameCanvas.value)
     await general.initAssets()
     game = new CGame(general)
     game.pvpManager = pvp
     game.onUIUpdate = syncUIState
+    game.onAutoPlayTriggered = (reason) => {
+      isAutoPlay.value = game?.isAutoPlay ?? false
+      showToast(reason)
+    }
 
     setInterval(() => {
       if (general) {
@@ -2427,6 +2521,71 @@ onUnmounted(() => {
   border-color: #38bdf8 !important;
   color: #fff !important;
   font-weight: 900;
+}
+.autoplay-top-btn.active {
+  background: linear-gradient(90deg, #059669 0%, #10b981 100%) !important;
+  border-color: #6ee7b7 !important;
+  color: #fff !important;
+  font-weight: 900;
+}
+.autoplay-panel-btn {
+  grid-column: span 2;
+  background: #1e293b;
+  border: 1px solid #10b981;
+  color: #6ee7b7;
+}
+.autoplay-panel-btn.active {
+  background: linear-gradient(90deg, #059669 0%, #10b981 100%);
+  color: #fff;
+}
+.walkie-btn {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #38bdf8;
+  background: linear-gradient(90deg, #0284c7 0%, #0369a1 100%);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.walkie-btn.recording {
+  background: linear-gradient(90deg, #dc2626 0%, #b91c1c 100%);
+  border-color: #fca5a5;
+  animation: pulseGlow 0.9s infinite alternate;
+}
+.turn-timer-pill {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid #38bdf8;
+  color: #e0f2fe;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 800;
+  z-index: 34;
+}
+.turn-timer-pill.urgent {
+  background: rgba(185, 28, 28, 0.92);
+  border-color: #fca5a5;
+  color: #fff;
+}
+.autoplay-active-banner {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(5, 150, 105, 0.92);
+  border: 1.5px solid #6ee7b7;
+  color: #fff;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  z-index: 36;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
 }
 
 /* Floating Fullscreen & Mobile Mini HUD */
