@@ -124,9 +124,12 @@
 
 | 测试维度 | 测试项与验证方法 | 结果 |
 | :--- | :--- | :--- |
-| **编译与构建验证** | 执行 `vue-tsc && vite build` 全量类型检查与生产环境打包 | ✅ **通过**（0 错误，`dist/` 构建耗时 `1.07s`） |
-| **局域网与房间 API** | 调用 `GET /api/room/info` 与 `POST /api/room/send` 验证房间信令广播 | ✅ **通过**（自动识别本机 IPv4，广播返回 `ok: true`） |
-| **公网 WSS 信令通道** | 验证 `PublicWssSignaling` 连接 `wss://broker.emqx.io:8084/mqtt` 订阅房间主题与跨网消息收发 | ✅ **通过**（CONNACK & SUBSCRIBE 成功，状态显示 `🌐 公网跨网直连已就绪`） |
+| **编译与构建验证** | 执行 `vue-tsc && vite build` 全量类型检查与生产环境打包 | ✅ **通过**（0 错误，`dist/` 构建耗时 `1.11s`） |
+| **台湾麻将女声报牌与唱番** | 验证 34 种牌面（`tiles/*.mp3`）、7 种动作（`actions/*.mp3`）、46 种胡牌牌型/等级（`yaku/*.mp3`）及 8 句腾讯快捷语音（`taunts/*.mp3`）共 95 个音频加载与顺序播报 | ✅ **通过**（线上 `HTTP/2 200 audio/mpeg`，胡牌结算逐一唱番清晰流畅） |
+| **多局连续联机同步 (Round 2+)** | 验证第 1 局胡牌结算进入第 2 局时，赢家与输家结算动画对齐、`pvpRoundCounter` 局数标签与 `tileCode` 强校验、庄家第 14 张摸牌与出牌同步 | ✅ **通过**（彻底解决次局「两边等待出牌但无牌可打」死锁问题） |
+| **SSE 8秒宽限防误报断线** | 验证 `/api/room/events` 瞬时重连期间 `leaveTimer`（8s Grace Period）自动抵消离线广播，心跳与出牌包自动清除断线横幅 | ✅ **通过**（移动网络/代理切换不再误弹「对手断线」） |
+| **腾讯棋牌倒计时与电脑托管** | 验证本机出牌 30s、鸣牌响应 15s、远程等待 45s、断线重连 60s 倒计时及超时自动转交 AI 托管代打 | ✅ **通过**（顶部/右侧/全屏胶囊均可一键切换托管，超时自动接管不卡局） |
+| **公网 WSS + 服务端语音中继** | 验证 WebRTC P2P 实时语音（含公共 TURN）与 `MediaRecorder` 3 秒真人语音切片（`VOICE_AUDIO_CHUNK`）双通道收发 | ✅ **通过**（跨网/手机端可双向听到真人语音与快捷喊话） |
 | **四人麻将模式 (4P)** | 测试 4P 模式下 `1~4 真人 + 空位 AI 自动补齐`、136 张确定性发牌、四向牌河渲染与吃/碰/杠/胡优先级仲裁 | ✅ **通过**（东南西北四家轮转正常，罗盘记分板实时更新） |
 | **联网防作弊管控** | 验证进入 PVP 后左侧秘技面板自动切换为风位战况榜、公平模式下 `DONDEN [Y]` 按钮锁定禁用 | ✅ **通过**（单端作弊入口已锁定，换人仅修改自身代表形象） |
 
@@ -137,26 +140,35 @@
 ```text
 my-mahjong-project/
 ├── index.html                  # 页面入口与标题配置
-├── package.json                # 项目依赖与构建脚本
-├── vite.config.ts              # Vite 配置 + 内置 PVP 房间 SSE/REST 信令与局域网 IP 探测插件
+├── package.json                # 项目依赖与构建脚本 (npm run dev / build / start)
+├── server.mjs                  # 生产级零依赖 Node.js 一体化服务端 (Gzip静态分发 + SSE房间信令 + 断线重连快照 + 8s防抖)
+├── vite.config.ts              # Vite 开发配置 + 内置 PVP 房间 SSE/REST 信令与局域网 IP 探测插件
+├── nginx-mj.eduready.ai.conf   # 生产环境 Nginx HTTPS 反向代理与 SSE 无缓冲配置
+├── deploy-server.sh            # 生产服务器 (173.231.53.226) 一键构建与 PM2 守护进程部署脚本
+├── HANDOFF.md                  # 项目全景架构、版本演进与生产运维交接手册
 ├── README.md                   # 项目说明与版本迭代文档
 ├── prd.md                      # 产品需求文档 (PRD)
 ├── public/
-│   └── weimzh/                 # 原版《电子基盘》静态资源包
+│   └── weimzh/                 # 原版《电子基盘》静态资源包 + 台湾女声语音库
 │       ├── images/             # 原版 640x480 背景、麻将牌图集、角色立绘、透明火苗/闪电/手部光标
 │       ├── sound/              # 11 组原版 .wav 动作与语音音效
 │       ├── music/              # 11 首原版 .ogg 街机背景音乐
-│       └── fonts/              # 原版文鼎楷体 (gkai00mp.ttf) 与毛笔字体 (brush.ttf)
+│       ├── fonts/              # 原版文鼎楷体 (gkai00mp.ttf) 与毛笔字体 (brush.ttf)
+│       └── voice/              # 95 条台湾甜美女声 (zh-TW-HsiaoChenNeural) MP3 语音包
+│           ├── tiles/          # 34 种麻将牌面报牌 (1C~9C萬, 1D~9D筒, 1B~9B條, 東南西北中發白)
+│           ├── actions/        # 7 种动作语音 (吃/碰/槓/聽牌啦/自摸啦/胡啦/換牌)
+│           ├── yaku/           # 46 种胡牌牌型(番种)与满贯~役满等级唱番语音
+│           └── taunts/         # 8 句腾讯《欢乐麻将》经典快捷语音
 └── src/
     ├── main.ts                 # Vue 3 挂载入口
-    ├── App.vue                 # 豪华街机框体 UI、触控手势层、公网/4P 联机大厅、风位战况榜与语音胶囊
+    ├── App.vue                 # 豪华街机框体 UI、全屏专注模式、托管开关、触控手势层、2P/4P 联机大厅与语音胶囊
     └── weimzh/                 # 电子基盘核心引擎与联机模块
-        ├── general.ts          # Canvas 640x480 渲染器、音效/BGM 播放器、Smart Audio Ducking 音频闪避
+        ├── general.ts          # Canvas 640x480 渲染器、并发预加载进度条、音效/BGM/台湾女声播放器、Smart Audio Ducking
         ├── tile.ts             # 麻将牌定义、136 张牌山管理与剩余牌数统计 (TotalRemainingTiles)
         ├── titles.ts           # 役种番数文本、Mulberry32 确定性种子 PRNG (setGameSeed)
         ├── hand.ts             # 手牌结构、吃/碰/杠/听/和牌拆解算法
-        ├── player.ts           # CPlayer / CBot / CGame 街机主循环 + 2P 死斗 & 4P 四人环桌引擎 + 防作弊管控
-        └── pvpManager.ts       # 三通道房间信令 (公网 MQTT over WSS + 局域网 SSE + BroadcastChannel) + 多路 WebRTC 语音
+        ├── player.ts           # CPlayer / CBot / CGame 街机主循环 + 2P/4P 引擎 + 台湾女声唱番 + 腾讯倒计时与托管
+        └── pvpManager.ts       # 三通道房间信令 (公网WSS + 同域SSE + BroadcastChannel) + 局数/牌面同步校验 + WebRTC/语音中继
 ```
 
 ---
