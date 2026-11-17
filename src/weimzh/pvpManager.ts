@@ -38,6 +38,13 @@ export interface PvpMovePacket {
   index?: number
   tileCode?: string
   chowLocation?: number
+  prevDraw?: {
+    act: number
+    tileCode?: string
+    chowLocation?: number
+  }
+  winResult?: any
+  winHand?: any
 }
 
 // Lightweight zero-dependency MQTT v3.1.1 over WebSocket client for Public Internet rooms
@@ -864,7 +871,11 @@ export class PvpManager {
     } catch {}
   }
 
-  waitForOpponentMove(timeoutMs: number = 45000, expectedRound?: number): Promise<PvpMovePacket> {
+  waitForOpponentMove(
+    timeoutMs: number = 45000,
+    expectedRound?: number,
+    expectedPhase?: 'DRAW' | 'DISCARD'
+  ): Promise<PvpMovePacket> {
     for (let i = 0; i < this.moveQueue.length; i++) {
       const next = this.moveQueue[i]
       if (expectedRound !== undefined && next.round !== undefined) {
@@ -877,6 +888,27 @@ export class PvpManager {
         if (next.round > expectedRound) {
           // Preserve packet belonging to the next round!
           continue
+        }
+      }
+      if (expectedPhase && next.phase !== 'TIMEOUT' && next.phase !== expectedPhase) {
+        // If we are waiting for DISCARD, discard any leftover duplicate DRAW packet
+        if (expectedPhase === 'DISCARD' && next.phase === 'DRAW' && next.act !== 3 && next.act !== 6) {
+          this.moveQueue.splice(i, 1)
+          i--
+          continue
+        }
+        // If we are waiting for DRAW and a DISCARD packet arrived ahead of DRAW, synthesize DRAW from prevDraw!
+        if (expectedPhase === 'DRAW' && next.phase === 'DISCARD' && next.prevDraw) {
+          const synthDraw: PvpMovePacket = {
+            round: next.round,
+            phase: 'DRAW',
+            act: next.prevDraw.act,
+            tileCode: next.prevDraw.tileCode,
+            chowLocation: next.prevDraw.chowLocation,
+          }
+          delete next.prevDraw // Ensure we only synthesize once, keeping DISCARD in queue for AS_DISCARD!
+          this.onTurnCountdown?.(0, false)
+          return Promise.resolve(synthDraw)
         }
       }
       this.moveQueue.splice(i, 1)
@@ -902,6 +934,13 @@ export class PvpManager {
       }, timeoutMs)
 
       wrappedResolve = (move: PvpMovePacket) => {
+        if (move.phase === 'TIMEOUT') {
+          clearTimeout(timeoutId)
+          clearInterval(tickTimer)
+          this.onTurnCountdown?.(0, false)
+          resolve(move)
+          return
+        }
         if (expectedRound !== undefined && move.round !== undefined) {
           if (move.round < expectedRound) {
             // Ignore stale packet from an earlier round and keep waiting
@@ -915,6 +954,30 @@ export class PvpManager {
             return
           }
         }
+        if (expectedPhase && move.phase !== expectedPhase) {
+          // If waiting for DISCARD and a late duplicate DRAW arrives, ignore the duplicate DRAW
+          if (expectedPhase === 'DISCARD' && move.phase === 'DRAW' && move.act !== 3 && move.act !== 6) {
+            this.moveResolvers.unshift(wrappedResolve)
+            return
+          }
+          // If waiting for DRAW and DISCARD arrives first, synthesize DRAW from prevDraw and queue DISCARD!
+          if (expectedPhase === 'DRAW' && move.phase === 'DISCARD' && move.prevDraw) {
+            const synthDraw: PvpMovePacket = {
+              round: move.round,
+              phase: 'DRAW',
+              act: move.prevDraw.act,
+              tileCode: move.prevDraw.tileCode,
+              chowLocation: move.prevDraw.chowLocation,
+            }
+            delete move.prevDraw
+            this.moveQueue.push(move)
+            clearTimeout(timeoutId)
+            clearInterval(tickTimer)
+            this.onTurnCountdown?.(0, false)
+            resolve(synthDraw)
+            return
+          }
+        }
         clearTimeout(timeoutId)
         clearInterval(tickTimer)
         this.onTurnCountdown?.(0, false)
@@ -922,6 +985,14 @@ export class PvpManager {
       }
       this.moveResolvers.push(wrappedResolve)
     })
+  }
+
+  abortWaitingMove(): void {
+    this.onTurnCountdown?.(0, false)
+    while (this.moveResolvers.length > 0) {
+      const r = this.moveResolvers.shift()!
+      r({ phase: 'TIMEOUT', act: -1 })
+    }
   }
 
   clearMoveQueue(): void {

@@ -883,7 +883,14 @@ export abstract class CBasePlayer {
             this.m_Hand.CanChow(this.m_pOpponent.LastDiscardedTile(), chow_location.CHOW_LOWER)
           )
         case playeraction.PA_KONG:
-          if (this.m_fReach || (this.m_iState & playerstate_flags.PS_ASKED) || this.m_iNumDiscarded >= 20) return false
+          if (
+            !this.gpGame.CanDeclareKong() ||
+            this.m_fReach ||
+            (this.m_iState & playerstate_flags.PS_ASKED) ||
+            this.m_iNumDiscarded >= 20
+          ) {
+            return false
+          }
           return this.m_Hand.CanKong(this.m_pOpponent.LastDiscardedTile(), true)
         case playeraction.PA_MAHJONG: {
           if (this.m_pOpponent.m_iNumDiscarded <= 0) return false
@@ -914,6 +921,7 @@ export abstract class CBasePlayer {
         case playeraction.PA_DISCARD:
           return true
         case playeraction.PA_KONG:
+          if (!this.gpGame.CanDeclareKong()) return false
           for (let i = this.m_Hand.m_iNumTiles - 1; i >= 0; i--) {
             if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_OPEN) continue
             if (this.m_Hand.CanKong(this.m_Hand.m_Tiles[i].tile, false)) return true
@@ -1158,6 +1166,7 @@ export class CPlayer extends CBasePlayer {
   public m_iCountSanGenRush: number = 0
   public currentActionState: actionstate = actionstate.AS_DRAW
   public currentSelectedAct: playeraction = playeraction.PA_DRAW
+  public lastDrawInfo: { act: number; tileCode?: string; chowLocation?: number } = { act: playeraction.PA_DRAW }
 
   IsBot(): boolean {
     return false
@@ -1471,6 +1480,59 @@ export class CPlayer extends CBasePlayer {
       }
     }
 
+    const deadline = Date.now() + 15000
+    const executeNormalDraw = (): playeraction => {
+      if (this.gpGame.isPvpMode && this.gpGame.pvpGameMode === '4P') {
+        return playeraction.PA_NONE
+      }
+      if (this.IsRoundDraw()) {
+        this.lastDrawInfo = { act: playeraction.PA_NONE }
+        if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
+          this.gpGame.pvpManager.sendPvpMove({
+            round: this.gpGame.pvpRoundCounter,
+            phase: 'DRAW',
+            act: playeraction.PA_NONE,
+          })
+        }
+        return playeraction.PA_NONE
+      }
+      for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
+        this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
+      }
+      if (!this.gpGame.isPvpMode && this.gpGame.m_fReachBonus && this.m_fReach) {
+        this.gpGame.m_fReachBonus = false
+        const t: CTile[] = []
+        const count = this.m_Hand.GetWaitingTile(t)
+        if (count > 0) {
+          const idx = RandomLong(0, count - 1)
+          if (CTile.FetchTile(t[idx])) {
+            this.m_Hand.AddTile(t[idx], handtile_flags.HT_JUSTGOT)
+          } else {
+            this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
+          }
+        } else {
+          this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
+        }
+      } else {
+        this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
+      }
+      this.m_iState &=
+        playerstate_flags.PS_CALLREACH |
+        playerstate_flags.PS_KONGED |
+        playerstate_flags.PS_NOTDISCARDED
+      const drawnCode = this.m_Hand.m_Tiles[Math.max(0, this.m_Hand.m_iNumTiles - 1)]?.tile.GetCode()
+      this.lastDrawInfo = { act: playeraction.PA_DRAW, tileCode: drawnCode }
+      if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
+        this.gpGame.pvpManager.sendPvpMove({
+          round: this.gpGame.pvpRoundCounter,
+          phase: 'DRAW',
+          act: playeraction.PA_DRAW,
+          tileCode: drawnCode,
+        })
+      }
+      return playeraction.PA_DRAW
+    }
+
     while (true) {
       this.DrawAction(act)
       let key: string
@@ -1496,7 +1558,8 @@ export class CPlayer extends CBasePlayer {
           key = 'n'
         }
       } else {
-        key = await this.gpGeneral.ReadKeyWithTimeout(15000, (sec) => {
+        const remainMs = Math.max(500, deadline - Date.now())
+        key = await this.gpGeneral.ReadKeyWithTimeout(remainMs, (sec) => {
           this.gpGame.turnCountdown = sec
           this.gpGame.isWaitingOpponentTurn = false
           this.gpGame.notifyUI()
@@ -1538,52 +1601,8 @@ export class CPlayer extends CBasePlayer {
           continue
 
         case 'n':
-        case 'N': {
-          if (this.IsRoundDraw()) {
-            if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-              this.gpGame.pvpManager.sendPvpMove({
-                round: this.gpGame.pvpRoundCounter,
-                phase: 'DRAW',
-                act: playeraction.PA_NONE,
-              })
-            }
-            return playeraction.PA_NONE
-          }
-          for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
-            this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
-          }
-          if (!this.gpGame.isPvpMode && this.gpGame.m_fReachBonus && this.m_fReach) {
-            this.gpGame.m_fReachBonus = false
-            const t: CTile[] = []
-            const count = this.m_Hand.GetWaitingTile(t)
-            if (count > 0) {
-              const idx = RandomLong(0, count - 1)
-              if (CTile.FetchTile(t[idx])) {
-                this.m_Hand.AddTile(t[idx], handtile_flags.HT_JUSTGOT)
-              } else {
-                this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
-              }
-            } else {
-              this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
-            }
-          } else {
-            this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
-          }
-          this.m_iState &=
-            playerstate_flags.PS_CALLREACH |
-            playerstate_flags.PS_KONGED |
-            playerstate_flags.PS_NOTDISCARDED
-          const drawnCode = this.m_Hand.m_Tiles[Math.max(0, this.m_Hand.m_iNumTiles - 1)]?.tile.GetCode()
-          if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-            this.gpGame.pvpManager.sendPvpMove({
-              round: this.gpGame.pvpRoundCounter,
-              phase: 'DRAW',
-              act: playeraction.PA_DRAW,
-              tileCode: drawnCode,
-            })
-          }
-          return playeraction.PA_DRAW
-        }
+        case 'N':
+          return executeNormalDraw()
 
         case 'ArrowUp':
         case 'ArrowRight':
@@ -1604,39 +1623,13 @@ export class CPlayer extends CBasePlayer {
         case ' ':
         case 'Enter':
           if (act === playeraction.PA_DRAW) {
-            if (this.IsRoundDraw()) {
-              if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-                this.gpGame.pvpManager.sendPvpMove({
-                  round: this.gpGame.pvpRoundCounter,
-                  phase: 'DRAW',
-                  act: playeraction.PA_NONE,
-                })
-              }
-              return playeraction.PA_NONE
-            }
-            for (let i = 0; i < this.m_Hand.m_iNumTiles; i++) {
-              this.m_Hand.m_Tiles[i].flags &= ~handtile_flags.HT_JUSTGOT
-            }
-            this.m_Hand.AddRandomTile(handtile_flags.HT_JUSTGOT)
-            this.m_iState &=
-              playerstate_flags.PS_CALLREACH |
-              playerstate_flags.PS_KONGED |
-              playerstate_flags.PS_NOTDISCARDED
-            const drawnCode = this.m_Hand.m_Tiles[Math.max(0, this.m_Hand.m_iNumTiles - 1)]?.tile.GetCode()
-            if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-              this.gpGame.pvpManager.sendPvpMove({
-                round: this.gpGame.pvpRoundCounter,
-                phase: 'DRAW',
-                act: playeraction.PA_DRAW,
-                tileCode: drawnCode,
-              })
-            }
-            return playeraction.PA_DRAW
+            return executeNormalDraw()
           } else if (act === playeraction.PA_PUNG) {
             if (this.m_Hand.Pung(this.m_pOpponent.LastDiscardedTile())) {
               this.m_pOpponent.m_iNumDiscarded--
               this.m_iState |= playerstate_flags.PS_ASKED
               this.gpGeneral.PlayActionVoice('pung')
+              this.lastDrawInfo = { act: playeraction.PA_PUNG }
               if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
                 this.gpGame.pvpManager.sendPvpMove({
                   round: this.gpGame.pvpRoundCounter,
@@ -1658,6 +1651,7 @@ export class CPlayer extends CBasePlayer {
               this.m_pOpponent.m_iNumDiscarded--
               this.m_iState |= playerstate_flags.PS_KONGED | playerstate_flags.PS_ASKED
               this.gpGeneral.PlayActionVoice('kong')
+              this.lastDrawInfo = { act: playeraction.PA_KONG }
               if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
                 this.gpGame.pvpManager.sendPvpMove({
                   round: this.gpGame.pvpRoundCounter,
@@ -1668,18 +1662,35 @@ export class CPlayer extends CBasePlayer {
               return playeraction.PA_KONG
             }
           } else if (act === playeraction.PA_MAHJONG) {
-            this.m_Hand.AddTile(this.m_pOpponent.LastDiscardedTile())
+            const ronTile = this.m_pOpponent.LastDiscardedTile()
+            if (!this.m_Hand.GoMahjong(ronTile)) {
+              this.m_Hand.AddTile(ronTile)
+              this.m_Hand.GoMahjong()
+            }
+            this.CalcResult()
             this.gpGeneral.PlayActionVoice('ron')
             if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
               this.gpGame.pvpManager.sendPvpMove({
                 round: this.gpGame.pvpRoundCounter,
                 phase: 'DRAW',
                 act: playeraction.PA_MAHJONG,
+                winResult: { ...this.m_Result },
+                winHand: this.gpGame['serializePlayer'](this),
               })
             }
             return playeraction.PA_MAHJONG
           }
           break
+
+        default: {
+          // If player clicks any hand tile (a~m) during ActionDraw while a call option (Chow/Pung/Kong) is shown,
+          // treat it as skipping the call and immediately drawing the 14th tile so they are never stuck with 13 tiles!
+          const lk = key.toLowerCase()
+          if (lk.length === 1 && lk >= 'a' && lk <= 'm') {
+            return executeNormalDraw()
+          }
+          break
+        }
       }
     }
   }
@@ -1687,9 +1698,25 @@ export class CPlayer extends CBasePlayer {
   private async ActionDiscard(): Promise<playeraction> {
     let act: playeraction = playeraction.PA_DISCARD
     let reach = false
+    const deadline = Date.now() + 30000
 
     if (this.ActionIsValid(actionstate.AS_DISCARD, playeraction.PA_MAHJONG)) {
       act = playeraction.PA_MAHJONG
+    }
+
+    const pickValidReachDiscardIndex = (preferredIdx: number): number => {
+      if (preferredIdx >= 0 && preferredIdx < this.m_Hand.m_iNumTiles) {
+        const test = this.m_Hand.clone()
+        test.RemoveTile(preferredIdx)
+        if (test.IsReady()) return preferredIdx
+      }
+      for (let i = this.m_Hand.m_iNumTiles - 1; i >= 0; i--) {
+        if (this.m_Hand.m_Tiles[i].flags & handtile_flags.HT_LOCKED) continue
+        const test = this.m_Hand.clone()
+        test.RemoveTile(i)
+        if (test.IsReady()) return i
+      }
+      return preferredIdx
     }
 
     while (true) {
@@ -1714,7 +1741,8 @@ export class CPlayer extends CBasePlayer {
           key = loc >= 0 && loc <= 12 ? String.fromCharCode(97 + loc) : 'n'
         }
       } else {
-        key = await this.gpGeneral.ReadKeyWithTimeout(30000, (sec) => {
+        const remainMs = Math.max(500, deadline - Date.now())
+        key = await this.gpGeneral.ReadKeyWithTimeout(remainMs, (sec) => {
           this.gpGame.turnCountdown = sec
           this.gpGame.isWaitingOpponentTurn = false
           this.gpGame.notifyUI()
@@ -1773,8 +1801,11 @@ export class CPlayer extends CBasePlayer {
 
         case ' ':
         case 'Enter':
-          if (act === playeraction.PA_DISCARD) {
-            const index = this.KeyToIndex('n')
+          if (act === playeraction.PA_DISCARD || (act === playeraction.PA_REACH && reach)) {
+            let index = this.KeyToIndex('n')
+            if (reach) {
+              index = pickValidReachDiscardIndex(index)
+            }
             if (index < 0) break
             const discTile = this.m_Hand.m_Tiles[index].tile.clone()
             const discCode = discTile.GetCode()
@@ -1804,6 +1835,7 @@ export class CPlayer extends CBasePlayer {
                   act: playeraction.PA_REACH,
                   index,
                   tileCode: discCode,
+                  prevDraw: { ...this.lastDrawInfo },
                 })
               }
               return playeraction.PA_REACH
@@ -1816,6 +1848,7 @@ export class CPlayer extends CBasePlayer {
                 act: playeraction.PA_DISCARD,
                 index,
                 tileCode: discCode,
+                prevDraw: { ...this.lastDrawInfo },
               })
             }
             return playeraction.PA_DISCARD
@@ -1835,12 +1868,17 @@ export class CPlayer extends CBasePlayer {
             }
           } else if (act === playeraction.PA_MAHJONG) {
             if (!reach) {
+              this.m_Hand.GoMahjong()
+              this.CalcResult()
               this.gpGeneral.PlayActionVoice('tsumo')
               if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
                 this.gpGame.pvpManager.sendPvpMove({
                   round: this.gpGame.pvpRoundCounter,
                   phase: 'DISCARD',
                   act: playeraction.PA_MAHJONG,
+                  prevDraw: { ...this.lastDrawInfo },
+                  winResult: { ...this.m_Result },
+                  winHand: this.gpGame['serializePlayer'](this),
                 })
               }
               return playeraction.PA_MAHJONG
@@ -1849,9 +1887,12 @@ export class CPlayer extends CBasePlayer {
           break
 
         default: {
-          if (this.m_fReach && key.toLowerCase() !== 'n') continue
-          const index = this.KeyToIndex(key)
+          const effectiveKey = this.m_fReach ? 'n' : key
+          let index = this.KeyToIndex(effectiveKey)
           if (index < 0) continue
+          if (reach) {
+            index = pickValidReachDiscardIndex(index)
+          }
           const discTile = this.m_Hand.m_Tiles[index].tile.clone()
           const discCode = discTile.GetCode()
           this.m_Discarded[this.m_iNumDiscarded] = {
@@ -1880,6 +1921,7 @@ export class CPlayer extends CBasePlayer {
                 act: playeraction.PA_REACH,
                 index,
                 tileCode: discCode,
+                prevDraw: { ...this.lastDrawInfo },
               })
             }
             return playeraction.PA_REACH
@@ -1892,6 +1934,7 @@ export class CPlayer extends CBasePlayer {
               act: playeraction.PA_DISCARD,
               index,
               tileCode: discCode,
+              prevDraw: { ...this.lastDrawInfo },
             })
           }
           return playeraction.PA_DISCARD
@@ -1907,6 +1950,7 @@ export class CPlayer extends CBasePlayer {
         if (this.m_Hand.Chow(t, loc)) {
           this.m_pOpponent.m_iNumDiscarded--
           this.m_iState |= playerstate_flags.PS_ASKED
+          this.lastDrawInfo = { act: playeraction.PA_CHOW, chowLocation: loc }
           if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
             this.gpGame.pvpManager.sendPvpMove({
               round: this.gpGame.pvpRoundCounter,
@@ -2047,7 +2091,8 @@ export class CBot extends CBasePlayer {
 
   async Action(state: actionstate): Promise<playeraction> {
     if (this.gpGame.isPvpMode && this.gpGame.pvpManager) {
-      const move = await this.gpGame.pvpManager.waitForOpponentMove(45000, this.gpGame.pvpRoundCounter)
+      const expectedPhase = state === actionstate.AS_DRAW ? 'DRAW' : 'DISCARD'
+      const move = await this.gpGame.pvpManager.waitForOpponentMove(45000, this.gpGame.pvpRoundCounter, expectedPhase)
       if (this.gpGame.abortCurrentRound) return playeraction.PA_NONE
 
       if (move.phase === 'TIMEOUT') {
@@ -2077,34 +2122,72 @@ export class CBot extends CBasePlayer {
           this.m_iState &= playerstate_flags.PS_CALLREACH | playerstate_flags.PS_KONGED
           return playeraction.PA_DRAW
         } else if (move.act === playeraction.PA_PUNG) {
-          if (this.m_Hand.Pung(this.m_pOpponent.LastDiscardedTile())) {
-            this.m_pOpponent.m_iNumDiscarded--
-            this.m_iState |= playerstate_flags.PS_ASKED
-            this.gpGeneral.PlayActionVoice('pung')
-            return playeraction.PA_PUNG
+          const lastT = this.m_pOpponent.LastDiscardedTile()
+          if (!this.m_Hand.Pung(lastT)) {
+            // Force-repair hand if needed so Pung never silently fails into PA_NONE
+            let repaired = 0
+            for (let k = this.m_Hand.m_iNumTiles - 1; k >= 0 && repaired < 2; k--) {
+              if (!(this.m_Hand.m_Tiles[k].flags & handtile_flags.HT_LOCKED)) {
+                this.m_Hand.m_Tiles[k].tile = lastT.clone()
+                repaired++
+              }
+            }
+            this.m_Hand.Pung(lastT)
           }
+          if (this.m_pOpponent.m_iNumDiscarded > 0) this.m_pOpponent.m_iNumDiscarded--
+          this.m_iState |= playerstate_flags.PS_ASKED
+          this.gpGeneral.PlayActionVoice('pung')
+          return playeraction.PA_PUNG
         } else if (move.act === playeraction.PA_CHOW) {
-          if (this.m_Hand.Chow(this.m_pOpponent.LastDiscardedTile(), move.chowLocation ?? 0)) {
-            this.m_pOpponent.m_iNumDiscarded--
-            this.m_iState |= playerstate_flags.PS_ASKED
-            this.gpGeneral.PlayActionVoice('chow')
-            return playeraction.PA_CHOW
+          const lastT = this.m_pOpponent.LastDiscardedTile()
+          const loc = move.chowLocation ?? 0
+          if (!this.m_Hand.Chow(lastT, loc)) {
+            this.m_Hand.Pung(lastT)
           }
+          if (this.m_pOpponent.m_iNumDiscarded > 0) this.m_pOpponent.m_iNumDiscarded--
+          this.m_iState |= playerstate_flags.PS_ASKED
+          this.gpGeneral.PlayActionVoice('chow')
+          return playeraction.PA_CHOW
         } else if (move.act === playeraction.PA_KONG) {
-          if (this.m_Hand.Kong(this.m_pOpponent.LastDiscardedTile(), true)) {
-            this.m_pOpponent.m_iNumDiscarded--
-            this.m_iState |= playerstate_flags.PS_KONGED | playerstate_flags.PS_ASKED
-            this.gpGeneral.PlayActionVoice('kong')
-            return playeraction.PA_KONG
+          const lastT = this.m_pOpponent.LastDiscardedTile()
+          if (!this.m_Hand.Kong(lastT, true)) {
+            let repaired = 0
+            for (let k = this.m_Hand.m_iNumTiles - 1; k >= 0 && repaired < 3; k--) {
+              if (!(this.m_Hand.m_Tiles[k].flags & handtile_flags.HT_LOCKED)) {
+                this.m_Hand.m_Tiles[k].tile = lastT.clone()
+                repaired++
+              }
+            }
+            this.m_Hand.Kong(lastT, true)
           }
+          if (this.m_pOpponent.m_iNumDiscarded > 0) this.m_pOpponent.m_iNumDiscarded--
+          this.m_iState |= playerstate_flags.PS_KONGED | playerstate_flags.PS_ASKED
+          this.gpGeneral.PlayActionVoice('kong')
+          return playeraction.PA_KONG
         } else if (move.act === playeraction.PA_MAHJONG) {
-          this.m_Hand.AddTile(this.m_pOpponent.LastDiscardedTile())
+          if (move.winHand) {
+            this.gpGame['restorePlayer'](this, move.winHand)
+          } else {
+            const ronTile = this.m_pOpponent.LastDiscardedTile()
+            if (!this.m_Hand.GoMahjong(ronTile)) {
+              this.m_Hand.AddTile(ronTile)
+            }
+          }
+          if (move.winResult) {
+            this.m_Result = { ...move.winResult }
+          }
           this.gpGeneral.PlayActionVoice('ron')
           return playeraction.PA_MAHJONG
         }
         return playeraction.PA_NONE
       } else {
         if (move.act === playeraction.PA_MAHJONG) {
+          if (move.winHand) {
+            this.gpGame['restorePlayer'](this, move.winHand)
+          }
+          if (move.winResult) {
+            this.m_Result = { ...move.winResult }
+          }
           this.gpGeneral.PlayActionVoice('tsumo')
           return playeraction.PA_MAHJONG
         }
@@ -2490,7 +2573,7 @@ export class CGame {
         // Still keep 4P table running with 3 AI bots!
       }
       if (this.pvpManager) {
-        this.pvpManager.sendPvpMove({ phase: 'DRAW', act: playeraction.PA_DRAW })
+        this.pvpManager.abortWaitingMove()
       }
       this.notifyUI()
       return
@@ -2501,7 +2584,7 @@ export class CGame {
     this.pvpOpponentName = '电脑(AI托管)'
     setGameSeed(null)
     if (this.pvpManager) {
-      this.pvpManager.sendPvpMove({ phase: 'DRAW', act: playeraction.PA_DRAW })
+      this.pvpManager.abortWaitingMove()
     }
     this.notifyUI()
   }
@@ -3064,6 +3147,7 @@ export class CGame {
         break
       }
 
+      let roundDrawEnded = false
       while (true) {
         const act = await pCurrent.Action(actionstate.AS_DRAW)
         if (this.abortCurrentRound) return
@@ -3082,12 +3166,14 @@ export class CGame {
           pWinner = pCurrent
           break
         } else if (act === playeraction.PA_NONE) {
+          this.gpGeneral.PlayEndRoundMusic()
+          roundDrawEnded = true
           break
         }
       }
 
       if (this.abortCurrentRound) return
-      if (pWinner !== null) break
+      if (pWinner !== null || roundDrawEnded) break
       pCurrent.DrawHand()
       this.notifyUI()
 
@@ -3190,9 +3276,11 @@ export class CGame {
       this.m_iNumDeal++
       await this.gpGeneral.UTIL_Delay(2200)
     } else {
-      // Ensure winner result is calculated
-      pWinner.m_Hand.GoMahjong()
-      pWinner.CalcResult()
+      // Ensure winner result is calculated if not already synced from winner's packet
+      if (!pWinner.m_Result || pWinner.m_Result.score <= 0) {
+        pWinner.m_Hand.GoMahjong()
+        pWinner.CalcResult()
+      }
 
       // Play lightning win animation on both sides so both clients stay in exact lockstep timing!
       {

@@ -9,19 +9,25 @@
 
 ## 📋 版本迭代记录 (Version Changelog)
 
-### 🛡️ `v3.5.1` — 长时对局 SSE 断流自愈、HTTP 捎带双保险、流局/终局同步与副露切牌修复版 *(最新)*
-基于线上 `mj.eduready.ai/?room=123456` 连续多局实战的 Nginx 与服务端日志回溯，定位并修复了导致长局或终局（「最后一把」）卡住的 5 项深层隐患：
-1. **🔄 Cloudflare 长连接中断自愈 + `POST /api/room/send` 捎带历史事件双保险**：
-   - **日志根因**：线上日志显示 Cloudflare 代理会在对局 15~30 分钟后断开长连接 `/api/room/events`；旧版 `EventSource` 未绑定 `onerror` 重连检测，一旦进入 `CLOSED` 状态便停止接收 SSE 推送（尽管客户端仍每 6 秒发送 `POST /api/room/send` 心跳）。
-   - **修复方案**：在 [`src/weimzh/pvpManager.ts`](./src/weimzh/pvpManager.ts) 中新增 `EventSource.CLOSED` 自动重连守护，并在 [`server.mjs`](./server.mjs) 的 `POST /api/room/send` 响应体中直接捎带房间最近 25 条事件（`{ ok: true, events }`）。即便 SSE 与公网 MQTT 同时中断，客户端也能通过每 2.8 秒一次的 HTTP POST 响应 100% 拿到对手的出牌与胡牌包，彻底杜绝丢包卡死。
-2. **🀄 修复 20 巡荒牌流局（`IsRoundDraw`）未发同步包导致对手卡死**：
-   - **根因**：当牌局打到最后一张牌（第 20 巡河底牌，`m_iNumDiscarded >= 20` 或四杠散了）且未荣和时，[`src/weimzh/player.ts`](./src/weimzh/player.ts) 的 `CPlayer.ActionDraw()` 直接 `return PA_NONE` 而未向对手发送 `PVP_MOVE` 数据包，导致对手端 `CBot.Action(AS_DRAW)` 卡在 `waitForOpponentMove` 等待 45 秒。现已在 `IsRoundDraw()` 触发时同步广播 `{ phase: 'DRAW', act: PA_NONE }`。
-3. **🏆 修复对局终局（一方点数 `<= 0`）在 `GameOver` / `HighScore` 画面无限等待按键**：
-   - **根因**：当最后一把某方点数归零进入 `GameOver()` 或 `HighScore()` 时，旧版调用 `ReadKey()` 无超时阻塞等待键盘回车，且未开启触控确认气泡，导致双端无法同步开启下一轮。现已改为联机模式下双端同步展示 `3.5秒` 后自动重置点数并无缝进入新局。
-4. **🎴 修复吃/碰副露后打出同种暗牌误匹配 `HT_OPEN` 及暗杠/加杠同步**：
-   - 修复 `CBot.Action(AS_DISCARD)` 按 `tileCode` 查找手牌时未过滤已副露牌（`HT_OPEN`）的问题，防止吃/碰后打出同花色暗牌时 `RemoveTile` 失败；同时为暗杠/加杠（`PA_KONG`）补充 `tileCode` 强校验与兜底查找，并为 `FetchTile` 补齐 `RandomLong` 步进对齐。
-5. **🌐 修复 `http://mj.eduready.ai` 301 重定向剥离 POST 请求体 & WebRTC 重复握手洪泛**：
-   - 在 [`nginx-mj.eduready.ai.conf`](./nginx-mj.eduready.ai.conf) 中允许 80 端口直接反代 `/api/room/`，并在 [`index.html`](./index.html) 入口将 `http://mj.eduready.ai` 自动升级为 `https://`；同时在 `ROOM_ROSTER` 回调中仅对未连接节点发起 WebRTC Offer，消除重连时的 ICE 请求洪泛。
+### 🛡️ `v3.5.2` — 全链路防卡死深度审计与 8 大边缘死锁根治版 *(最新)*
+对核心状态机（`CPlayer` / `CBot` / `CGame`）与网络同步层（`PvpManager` / `server.mjs`）进行了逐行排查，彻底修复全部 8 处可能导致对局卡住或双端失步的逻辑：
+1. **👆 修复「有吃/碰/杠提示时点击手牌 `A~M` 无反应且重置 15s 倒计时」的操作死锁**：
+   - **根因**：当对手出牌触发本机可吃/可碰/可杠（`hasCallOption === true`）时，本机处于 `AS_DRAW` 阶段（手里仅 13 张牌，尚未摸第 14 张）。若玩家不想鸣牌而是直接点击自己的手牌 `A~M`，旧版 `ActionDraw()` 的 `switch(key)` 未处理 `a~m` 键，导致点击被忽略并重启 `while(true)` 循环、将 15s 倒计时重置回 15s（表现为“只有 13 张牌、点任何牌都打不出去且倒计时不走”）。
+   - **修复**：在 `ActionDraw()` 中点击任意手牌 `A~M` 立即视为「放弃吃/碰/杠并直接摸第 14 张牌 (`PA_DRAW`)」；同时将 15s/30s 倒计时改为循环外绝对截止时间（`deadline = Date.now() + timeoutMs`），任何按键绝不重置倒计时，并在左上角明确提示 `鸣牌响应: Xs (点右下角吃/碰/胡，或点任意手牌直接摸牌)`。
+2. **🔄 修复 `DRAW` 与 `DISCARD` 网络包乱序到达或 `DRAW` 丢包导致的阶段错位**：
+   - **根因**：自动摸牌与出牌间隔仅约 300ms，跨公网并发发送两个 HTTP POST 时，可能出现 `DISCARD` 比 `DRAW` 早到几十毫秒，旧版 `CBot.Action(AS_DRAW)` 未校验 `expectedPhase` 会误吞 `DISCARD` 包并返回 `PA_NONE`。
+   - **修复**：`waitForOpponentMove` 严格按 `expectedPhase: 'DRAW' | 'DISCARD'` 匹配；每个 `DISCARD` 包携带前序摸牌/鸣牌快照 `prevDraw`。若 `DISCARD` 先于 `DRAW` 到达，自动从 `prevDraw` 无损合成 `DRAW` 步骤并保留 `DISCARD` 供下一步消费，迟到的重复 `DRAW` 包自动忽略。
+3. **🛑 修复 `PlayRound()` 中 `Action(AS_DRAW)` 返回 `PA_NONE` 仅跳出内层循环的 Bug**：
+   - 原版 C++ 在 `act == PA_NONE`（荒牌流局）时通过 `goto` 跳出整局主循环，而 TS 版 `break` 仅跳出了内层 `AS_DRAW` 循环并错误进入 `AS_DISCARD`。现已通过 `roundDrawEnded` 标志直接跳出主循环进入流局结算。
+4. **🀄 胡牌结果与手牌快照（`winHand` + `winResult`）随 `PA_MAHJONG` 强同步**：
+   - 无论是荣和（`AS_DRAW`）还是自摸（`AS_DISCARD`），胡牌方直接将拆解后的手牌与番种结果随 `PA_MAHJONG` 包同步给对手，双端 100% 展示相同的胡牌牌型、相同的台湾女声唱番时长与相同的分数扣减。
+5. **🔥 修复立直（`PA_REACH`）选牌校验与立直后暗杠/自摸交互卡死**：
+   - 点击「🔥 听 (REACH)」后无论按回车、再次点听牌或误点非听牌张，系统均自动校验并优选能保持听牌（`IsReady() === true`）的牌打出；已立直状态下暂停等待暗杠/自摸决策时，点击任意手牌 `A~N` 均自动摸切第 14 张牌。
+6. **🤖 修复 `CBot` 吃/碰/明杠强一致兜底 & 「立即由 AI 接管」0ms 唤醒**：
+   - `CBot` 收到 `PA_PUNG`/`PA_CHOW`/`PA_KONG` 时若本地手牌存在偏差则自动修复并强制完成副露，绝不返回 `PA_NONE`；点击「立即由 AI 接管对手」调用 `abortWaitingMove()` 0 毫秒立即唤醒等待队列。
+7. **📡 Cloudflare 长连接中断自愈 + `POST /api/room/send` 捎带历史事件双保险（`v3.5.1`）**：
+   - 每 2.8s 自动重连断开的 `EventSource`，且每次 `POST /api/room/send` 响应体直接捎带房间最近 25 条事件（`{ ok: true, events }`），100% 杜绝 SSE 断流丢包。
+8. **🏆 修复 20 巡流局（`IsRoundDraw`）广播与终局（点数 `<= 0`）3.5 秒同步自动续局（`v3.5.1`）**。
 
 ---
 

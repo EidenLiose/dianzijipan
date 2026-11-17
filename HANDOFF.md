@@ -1,8 +1,8 @@
 # 《电子基盘》(Electron Base) 街机 1:1 复刻 & 公网 2P/4P 联机版
 # 项目全景架构与生产运维交接手册 (HANDOFF.md)
 
-**更新时间**：2026-11-16 23:30 (Local Time)  
-**当前版本**：**Release `v3.5.1`（长时对局 SSE 断流自愈 + HTTP POST 捎带双保险、流局/终局同步、副露切牌修复、台湾麻将甜美女声全配音与腾讯棋牌设定版）**  
+**更新时间**：2026-11-16 23:52 (Local Time)  
+**当前版本**：**Release `v3.5.2`（全链路 8 大防卡死深度加固：鸣牌阶段点击手牌直接摸牌、DRAW/DISCARD 乱序自愈、胡牌结果强同步、SSE 断流自愈 + HTTP POST 捎带双保险、台湾女声全配音与腾讯棋牌设定版）**  
 **线上生产域名**：[`https://mj.eduready.ai`](https://mj.eduready.ai)（服务器：`173.231.53.226`）  
 **GitHub 仓库**：[`https://github.com/EidenLiose/dianzijipan`](https://github.com/EidenLiose/dianzijipan)
 
@@ -94,11 +94,11 @@ flowchart TD
 
 ---
 
-## 4. 版本演进与重大技术问题复盘 (`v1.0.0` ~ `v3.5.1`)
+## 4. 版本演进与重大技术问题复盘 (`v1.0.0` ~ `v3.5.2`)
 
 | 版本号 | 关键里程碑与根因修复复盘 |
 | :--- | :--- |
-| **`v3.5.1`** *(当前)* | 1. **Cloudflare SSE 断流自愈 + `POST /api/room/send` 捎带历史事件双保险**：解决长时对局（15~30分钟）后 Cloudflare 断开 `/api/room/events` 导致 `EventSource` 进入 `CLOSED` 状态不再收包的问题；每次 HTTP POST 均返回最近 25 条房间事件并由 `seenMsgIds` 幂等消费，实现 100% 零丢包。<br>2. **20 巡荒牌流局（`IsRoundDraw`）同步包修复**：解决打完最后一张牌流局时 `CPlayer` 未发 `PA_NONE` 导致对手卡在 `waitForOpponentMove` 的问题。<br>3. **终局（点数 `<= 0`）`GameOver` / `HighScore` 自动推进**：联机模式下终局画面统一展示 `3.5s` 后自动重置点数开新局，不再阻塞等待键盘回车。<br>4. **副露（吃/碰）后同种暗牌切牌过滤 `HT_OPEN` & 暗杠 `tileCode` 同步**：防止 `RemoveTile` 误命中已副露牌导致手牌数异常。<br>5. **Nginx 80/443 双监听与 `http -> https` 前端自动升级**：消除 `http://mj.eduready.ai` 下 `POST /api/room/send` 被 `301` 重定向剥离请求体的问题。 |
+| **`v3.5.2`** *(当前)* | 1. **鸣牌阶段点击手牌 `A~M` 直接跳过并摸牌 + 循环外绝对倒计时**：解决玩家在可吃/可碰（手里 13 张牌）时点击手牌 `A~M` 被忽略且不断重置 15s 倒计时导致「无牌可打」的交互死锁。<br>2. **`DRAW` / `DISCARD` 阶段强校验与乱序/丢包自愈（`prevDraw`）**：每个 `DISCARD` 包附带前序 `prevDraw` 快照；若 `DISCARD` 先于 `DRAW` 到达或 `DRAW` 丢失，自动合成 `DRAW` 动作并保留 `DISCARD`，彻底杜绝阶段错位。<br>3. **`PlayRound` 流局 `PA_NONE` 外层跳出修复**：修复 `act === PA_NONE` 仅 `break` 内层循环而误入 `AS_DISCARD` 的移植 Bug。<br>4. **胡牌手牌与结果（`winHand` + `winResult`）随包强同步**：确保双端番种、分数、唱番语音时长 100% 一致。<br>5. **立直（`PA_REACH`）自动优选有效听牌张 & `abortWaitingMove()` 0ms 立即接管**。<br>6. **Cloudflare SSE 断流自愈 + `POST /api/room/send` 捎带最近 25 条事件双保险 + 20 巡流局广播与终局 3.5s 自动续局**。 |
 | **`v3.5.0`** | 1. **台湾甜美女声 95 条配音包**：覆盖 34 张牌面报牌、7 种动作（吃/碰/杠/听/自摸/胡/换牌）、46 种胡牌牌型结算逐一唱番。<br>2. **对齐腾讯《欢乐麻将》设定**：本机出牌 30s、鸣牌 15s、对手等待 45s、重连 60s；替换 8 句腾讯棋牌经典快捷语音 MP3。<br>3. **修复联机第 2 局「两边等待出牌但无牌可打」死锁**：统一赢家/输家胡牌动画时长，移除 `NewRound()` 中误删对方新局 `DRAW` 包的 `clearMoveQueue()`，增加 `round` 局数标签与 `tileCode` 牌面强校验，修复副露后 `N` 键槽位索引偏移。<br>4. **修复频繁误报「对手断线」**：`server.mjs` 增加 8 秒 SSE 重连宽限期（`leaveTimer`），过滤移动网络毫秒级闪断。 |
 | **`v3.4.0`** | 新增全局常驻 **「🤖 电脑托管」** 按钮與 **「立即由 AI 接管对手」** 按钮；实装出牌倒计时防挂机死锁；新增 OpenRelay TURN 节点与 `MediaRecorder` 3 秒真人语音切片服务端中继（`VOICE_AUDIO_CHUNK`），解决跨网麦克风与快捷语音无声问题。 |
 | **`v3.3.0`** | 默认对局模式设为 **2P 二人街机死斗**；新增联机弹窗内嵌昵称修改栏；新增 **「⛶ 全屏专注模式」**（隐藏外围面板，100% 聚焦牌桌）与手机端自适应布局减负；补齐开局换牌「✅ 确认完成」与鸣牌「⏭️ 跳过/摸牌」触控气泡。 |

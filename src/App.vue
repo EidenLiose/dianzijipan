@@ -293,6 +293,9 @@
             ⏱️ {{
               isWaitingOpponentTurn
                 ? `等待对手操作: ${turnCountdown}s (超时AI自动接管)`
+                : currentActionState === 0 &&
+                  (validActions.mahjong || validActions.kong || validActions.pung || validActions.chow)
+                ? `鸣牌响应: ${turnCountdown}s (点右下角吃/碰/胡，或点任意手牌直接摸牌)`
                 : `出牌倒计时: ${turnCountdown}s (超时自动托管)`
             }}
           </div>
