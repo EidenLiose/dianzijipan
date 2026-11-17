@@ -1,7 +1,7 @@
 <template>
   <div
     class="weimzh-arcade-shell"
-    :class="{ 'crt-active': crtEnabled }"
+    :class="{ 'crt-active': crtEnabled, 'fullscreen-mode': isFullscreen }"
     @click="unlockAudio"
     @contextmenu.prevent
   >
@@ -91,6 +91,9 @@
         </button>
         <button class="sys-btn" :class="{ off: !soundOn }" @click.stop="toggleSound">
           {{ soundOn ? '🔊 音效' : '🔇 音效' }}
+        </button>
+        <button class="sys-btn fullscreen-entry-btn" @click.stop="toggleFullscreen" title="进入沉浸全屏模式，隐藏两侧与上下控制面板">
+          {{ isFullscreen ? '✕ 退出全屏' : '⛶ 全屏专注' }}
         </button>
         <button class="sys-btn" @click.stop="crtEnabled = !crtEnabled">
           {{ crtEnabled ? '📺 CRT' : '📺 纯净' }}
@@ -266,8 +269,39 @@
             @pointerup="onCanvasPointerUp"
           ></canvas>
 
+          <!-- Floating Mini HUD Pill (Always accessible in Fullscreen or Mobile) -->
+          <div class="floating-fs-hud">
+            <button v-if="isFullscreen" class="fs-pill-btn exit" @click.stop="toggleFullscreen">
+              ✕ 退出全屏
+            </button>
+            <button v-else class="fs-pill-btn enter-mobile" @click.stop="toggleFullscreen">
+              ⛶ 全屏
+            </button>
+            <template v-if="isFullscreen">
+              <button class="fs-pill-btn" @click.stop="editMyName" title="修改昵称">
+                👤 {{ myName }} ✏️
+              </button>
+              <button class="fs-pill-btn invite" @click.stop="openInviteModal">
+                🤝 联机{{ roomId ? `(#${roomId})` : '' }}
+              </button>
+              <button class="fs-pill-btn" :class="{ active: micOn }" @click.stop="toggleMic">
+                {{ micOn ? '🎙️' : '🔇' }}
+              </button>
+              <button class="fs-pill-btn" @click.stop="restartMatch" title="重开牌局">
+                🔄
+              </button>
+            </template>
+          </div>
+
           <!-- PRD 4.1: Dynamic Action Bubbles on Bottom-Right of Screen -->
           <div class="dynamic-action-bubbles">
+            <button
+              v-if="hasActivePrompt"
+              class="bubble-btn bubble-confirm"
+              @click.stop="sendKey('Enter')"
+            >
+              ✅ 确认完成 [Enter]
+            </button>
             <button
               v-if="validActions.mahjong"
               class="bubble-btn bubble-ron"
@@ -302,6 +336,16 @@
               @click.stop="triggerPlayerAction(5)"
             >
               吃 (CHOW)
+            </button>
+            <button
+              v-if="
+                currentActionState === 0 &&
+                (validActions.mahjong || validActions.kong || validActions.pung || validActions.chow)
+              "
+              class="bubble-btn bubble-pass"
+              @click.stop="sendKey('n')"
+            >
+              ⏭️ 跳过/摸牌 [N]
             </button>
           </div>
 
@@ -432,6 +476,22 @@
           </div>
 
           <div class="modal-body">
+            <!-- Step 0: Prominent Nickname Editor -->
+            <div class="invite-section nick-edit-section">
+              <div class="nick-edit-row">
+                <span class="sec-label" style="margin-bottom: 0;">👤 我的固定昵称（刷新保持不变，方便牌友识别）：</span>
+                <input
+                  type="text"
+                  v-model="customNameInput"
+                  placeholder="输入您的个性化昵称"
+                  maxlength="14"
+                  class="nick-input"
+                  @keyup.enter="saveCustomNickname"
+                />
+                <button class="save-nick-btn" @click="saveCustomNickname">💾 保存昵称</button>
+              </div>
+            </div>
+
             <!-- Step 1: Share Link OR Join by 6-Digit Public Room Code -->
             <div class="invite-section">
               <label class="sec-label">1. 一链入房 / 输入 6 位房间号跨公网直连（支持异地宽带、手机5G、多开窗口）：</label>
@@ -459,11 +519,19 @@
               </div>
             </div>
 
-            <!-- Step 2: Mode (4P vs 2P) & Fair Rule Switch -->
+            <!-- Step 2: Mode (2P Default vs 4P) & Fair Rule Switch -->
             <div class="invite-grid-2col">
               <div class="invite-section">
-                <label class="sec-label">2. 选择对局模式与防作弊规则：</label>
+                <label class="sec-label">2. 选择对局模式（默认二人模式）与防作弊规则：</label>
                 <div class="mode-switch-grid">
+                  <button
+                    class="rule-card-btn"
+                    :class="{ selected: pvpGameMode === '2P' }"
+                    @click="setGameMode('2P')"
+                  >
+                    <div class="rc-title">⚔️ 二人街机死斗 (1v1 默认)</div>
+                    <div class="rc-desc">原版电子基盘二人对坐、17列牌河满贯死斗</div>
+                  </button>
                   <button
                     class="rule-card-btn"
                     :class="{ selected: pvpGameMode === '4P' }"
@@ -471,14 +539,6 @@
                   >
                     <div class="rc-title">🀄 四人环桌麻将 (4P 东南西北)</div>
                     <div class="rc-desc">支持 1~4 名真人同桌，空位由街机 AI 自动补齐</div>
-                  </button>
-                  <button
-                    class="rule-card-btn"
-                    :class="{ selected: pvpGameMode === '2P' }"
-                    @click="setGameMode('2P')"
-                  >
-                    <div class="rc-title">⚔️ 二人街机死斗 (1v1 经典)</div>
-                    <div class="rc-desc">原版电子基盘二人对坐、17列牌河满贯死斗</div>
                   </button>
                 </div>
 
@@ -603,14 +663,18 @@ const botScore = ref(16000)
 const dondenLeft = ref(8)
 
 // PVP & Voice Reactive State
+const isFullscreen = ref(false)
+const hasActivePrompt = ref(false)
+const currentActionState = ref(0)
 const roomId = ref('')
 const joinRoomInput = ref('')
+const customNameInput = ref('')
 const myPeerId = ref('')
 const myName = ref('街机雀神')
 const opponentName = ref('电脑')
 const isRoomConnected = ref(false)
 const isPvpMode = ref(false)
-const pvpGameMode = ref<'2P' | '4P'>('4P')
+const pvpGameMode = ref<'2P' | '4P'>('2P')
 const allowDonden = ref(false)
 const publicConnected = ref(false)
 const publicStatusText = ref('🌐 公网待机')
@@ -735,6 +799,8 @@ const syncUIState = () => {
   reachBonusActive.value = game.m_fReachBonus
 
   const st = game.m_pPlayer.currentActionState
+  currentActionState.value = st
+  hasActivePrompt.value = Boolean(general?.hasActivePrompt)
   validActions.chow = game.m_pPlayer.ActionIsValid(st, playeraction.PA_CHOW)
   validActions.pung = game.m_pPlayer.ActionIsValid(st, playeraction.PA_PUNG)
   validActions.kong = game.m_pPlayer.ActionIsValid(st, playeraction.PA_KONG)
@@ -844,7 +910,12 @@ const onCanvasPointerUp = (e: PointerEvent) => {
 }
 
 const onKeyDown = (e: KeyboardEvent) => {
+  if ((e.target as HTMLElement)?.tagName === 'INPUT') return
   unlockAudio()
+  if (e.key === 'Escape' && isFullscreen.value) {
+    isFullscreen.value = false
+    return
+  }
   if (!general || showInviteModal.value) return
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
     e.preventDefault()
@@ -871,9 +942,36 @@ const ensureRoomJoined = () => {
 const openInviteModal = () => {
   unlockAudio()
   ensureRoomJoined()
+  customNameInput.value = myName.value
   showInviteModal.value = true
   navigator.clipboard?.writeText(inviteUrl.value).catch(() => {})
   showToast('🤝 已创建专属房间并复制邀请链接！')
+}
+
+const toggleFullscreen = async () => {
+  unlockAudio()
+  const next = !isFullscreen.value
+  isFullscreen.value = next
+  try {
+    if (next && document.documentElement.requestFullscreen && !document.fullscreenElement) {
+      await document.documentElement.requestFullscreen()
+    } else if (!next && document.fullscreenElement && document.exitFullscreen) {
+      await document.exitFullscreen()
+    }
+  } catch {}
+  showToast(next ? '⛶ 已进入全屏专注模式（点击右上角可随时退出）' : '已退出全屏模式')
+}
+
+const saveCustomNickname = () => {
+  const trimmed = customNameInput.value.trim()
+  if (!trimmed) {
+    showToast('⚠️ 昵称不能为空')
+    return
+  }
+  pvp.setMyName(trimmed)
+  myName.value = pvp.myName
+  customNameInput.value = pvp.myName
+  showToast(`✅ 您的昵称已保存为：【${myName.value}】`)
 }
 
 const copyInviteLink = () => {
@@ -1105,6 +1203,12 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
   myPeerId.value = pvp.peerId
   myName.value = pvp.myName
+  customNameInput.value = pvp.myName
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && isFullscreen.value) {
+      // Keep CSS fullscreen unless user explicitly exits or presses Esc
+    }
+  })
 
   // Setup PVP Callbacks
   pvp.onRosterUpdate = (peers, joinedPeerId) => {
@@ -1211,6 +1315,12 @@ onMounted(async () => {
     game = new CGame(general)
     game.pvpManager = pvp
     game.onUIUpdate = syncUIState
+
+    setInterval(() => {
+      if (general) {
+        hasActivePrompt.value = Boolean(general.hasActivePrompt)
+      }
+    }, 250)
 
     const params = new URLSearchParams(window.location.search)
     const urlRoom = params.get('room')
@@ -2279,5 +2389,174 @@ onUnmounted(() => {
 .bot-slot {
   color: #94a3b8;
   font-weight: 600;
+}
+
+/* Nickname Editor Section in Modal */
+.nick-edit-section {
+  background: rgba(14, 116, 144, 0.16);
+  border: 1px solid #0ea5e9;
+}
+.nick-edit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.nick-input {
+  width: 180px;
+  background: #020617;
+  border: 1px solid #38bdf8;
+  border-radius: 5px;
+  padding: 5px 10px;
+  color: #fde047;
+  font-weight: 800;
+  font-size: 13px;
+}
+.save-nick-btn {
+  background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+  color: #fff;
+  border: none;
+  padding: 5px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.fullscreen-entry-btn {
+  background: linear-gradient(90deg, #0284c7 0%, #2563eb 100%);
+  border-color: #38bdf8 !important;
+  color: #fff !important;
+  font-weight: 900;
+}
+
+/* Floating Fullscreen & Mobile Mini HUD */
+.floating-fs-hud {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 35;
+}
+.fs-pill-btn {
+  background: rgba(15, 23, 42, 0.82);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  color: #f8fafc;
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+.fs-pill-btn.exit {
+  background: rgba(220, 38, 38, 0.88);
+  border-color: #f87171;
+  color: #fff;
+}
+.fs-pill-btn.enter-mobile {
+  background: rgba(2, 132, 199, 0.88);
+  border-color: #38bdf8;
+  color: #fff;
+}
+.fs-pill-btn.invite {
+  background: rgba(234, 88, 12, 0.88);
+  border-color: #fb923c;
+  color: #fff;
+}
+.fs-pill-btn.active {
+  border-color: #10b981;
+  color: #6ee7b7;
+}
+.bubble-confirm {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border: 2px solid #a7f3d0;
+  color: #fff;
+}
+.bubble-pass {
+  background: rgba(30, 41, 59, 0.92);
+  border: 1.5px solid #94a3b8;
+  color: #e2e8f0;
+}
+
+/* Fullscreen Focus Mode: Hide all outer chrome & maximize 4:3 Canvas */
+.weimzh-arcade-shell.fullscreen-mode .arcade-marquee,
+.weimzh-arcade-shell.fullscreen-mode .side-panel,
+.weimzh-arcade-shell.fullscreen-mode .arcade-control-deck {
+  display: none !important;
+}
+.weimzh-arcade-shell.fullscreen-mode .cabinet-body {
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+.weimzh-arcade-shell.fullscreen-mode .crt-monitor-frame {
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.weimzh-arcade-shell.fullscreen-mode .crt-glass {
+  width: min(100vw, calc(100vh * 4 / 3));
+  height: min(100vh, calc(100vw * 3 / 4));
+  border-radius: 0;
+  border: none;
+}
+
+/* Mobile & Tablet Responsive Optimization (< 960px) */
+@media (max-width: 960px) {
+  .side-panel {
+    display: none !important;
+  }
+  .arcade-marquee {
+    height: auto;
+    min-height: 44px;
+    flex-wrap: wrap;
+    padding: 4px 8px;
+    gap: 4px;
+  }
+  .neon-logo .logo-en,
+  .stage-pill {
+    display: none;
+  }
+  .cabinet-body {
+    flex: 1;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .crt-monitor-frame {
+    width: 100%;
+    height: 100%;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .crt-glass {
+    width: min(99vw, calc((100vh - 96px) * 4 / 3));
+    height: min(calc(100vh - 96px), calc(99vw * 3 / 4));
+  }
+  .arcade-control-deck {
+    height: 42px;
+    padding: 2px 4px;
+  }
+  .key-sub {
+    display: none;
+  }
 }
 </style>

@@ -254,7 +254,7 @@ export class PvpManager {
   public myName: string = ''
   public myGirl: number = 2
   public betAmount: number = 20
-  public gameMode: '2P' | '4P' = '4P'
+  public gameMode: '2P' | '4P' = '2P'
   public allowDonden: boolean = false // Default: Fair competitive mode (No DONDEN)
 
   public peers: PvpPeerInfo[] = []

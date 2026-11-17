@@ -66,6 +66,7 @@ export class CGeneral {
   public isMusicMuted: boolean = false
   public isSoundMuted: boolean = false
   public isAudioDucked: boolean = false
+  public hasActivePrompt: boolean = false
   private duckTimeout: any = null
 
   private savedMsgImage: ImageData | null = null
@@ -281,6 +282,11 @@ export class CGeneral {
           return
         }
       }
+      // Tap on DON DEN counter area on canvas -> trigger 'y' (DONDEN swap)
+      if (x >= 450 && x <= 630 && y >= 265 && y <= 330 && !this.hasActivePrompt) {
+        this.pushKey('y')
+        return
+      }
       this.pushKey('Enter')
     }
   }
@@ -402,12 +408,14 @@ export class CGeneral {
 
   DrawMessage(sz: string | null): void {
     if (sz === null) {
+      this.hasActivePrompt = false
       if (this.savedMsgImage) {
         this.ctx.putImageData(this.savedMsgImage, 150, 300)
         this.savedMsgImage = null
       }
       return
     }
+    this.hasActivePrompt = true
     if (!this.savedMsgImage) {
       this.savedMsgImage = this.ctx.getImageData(150, 300, 340, 60)
     }
