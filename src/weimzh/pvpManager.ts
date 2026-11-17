@@ -556,7 +556,7 @@ export class PvpManager {
         // Trigger WebRTC offer only to peers that don't already have an active/connecting RTCPeerConnection
         for (const p of this.peers) {
           if (p.peerId !== this.peerId && (this.isHost || this.peerId < p.peerId)) {
-            const existingPc = this.peerConnections.get(p.peerId)
+            const existingPc = this.pcs.get(p.peerId)
             const st = existingPc?.connectionState
             if (!existingPc || st === 'failed' || st === 'closed' || st === 'disconnected') {
               this.startWebRTCOffer(p.peerId)
